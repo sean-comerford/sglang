@@ -19,6 +19,7 @@ if [ ${ARCH} = "aarch64" ]; then
 else
    LIBCUDA_ARCH=${ARCH}
    BUILDER_NAME="pytorch/manylinux2_28-builder"
+   CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
 fi
 
 if [ ${CUDA_VERSION} = "12.8" ]; then
@@ -60,6 +61,6 @@ docker run --rm \
 
    cd /sgl-kernel && \
    ls -la ${PYTHON_ROOT_PATH}/lib/python${PYTHON_VERSION}/site-packages/wheel/ && \
-   PYTHONPATH=${PYTHON_ROOT_PATH}/lib/python${PYTHON_VERSION}/site-packages ${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation && \
+   CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL} PYTHONPATH=${PYTHON_ROOT_PATH}/lib/python${PYTHON_VERSION}/site-packages ${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation && \
    ./rename_wheels.sh
    "
