@@ -153,6 +153,22 @@ async fn remove_worker(
     HttpResponse::Ok().body(format!("Successfully removed worker: {}", worker_url))
 }
 
+#[post("/flush_cache")]
+async fn flush_cache(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    // Route to all workers for cache flushing
+    data.router
+        .route_to_all(&data.client, "/flush_cache", &req)
+        .await
+}
+
+#[get("/get_loads")]
+async fn get_loads(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    // Get loads from all workers
+    data.router
+        .get_all_loads(&data.client, &req)
+        .await
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -276,6 +292,8 @@ pub async fn startup(config: ServerConfig) -> std::io::Result<()> {
             .service(add_worker)
             .service(remove_worker)
             .service(list_workers)
+            .service(flush_cache)
+            .service(get_loads)
             // Default handler for unmatched routes.
             .default_service(web::route().to(sink_handler))
     })
