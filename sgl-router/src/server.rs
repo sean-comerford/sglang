@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::spawn;
 use tracing::{error, info, warn, Level};
+use crate::pd_types::{GenerateReqInput, ChatReqInput};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -59,23 +60,48 @@ async fn health(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
 
 #[get("/health_generate")]
 async fn health_generate(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
-    data.router
-        .route_to_first(&data.client, "/health_generate", &req)
-        .await
+    // Check if we're in PD mode
+    if data.router.is_prefill_decode() {
+        // For PD mode, check health on all servers
+        data.router
+            .route_pd_health_generate(&data.client, &req)
+            .await
+    } else {
+        // Regular mode
+        data.router
+            .route_to_first(&data.client, "/health_generate", &req)
+            .await
+    }
 }
 
 #[get("/get_server_info")]
 async fn get_server_info(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
-    data.router
-        .route_to_first(&data.client, "/get_server_info", &req)
-        .await
+    if data.router.is_prefill_decode() {
+        // For PD mode, aggregate info from both prefill and decode servers
+        data.router
+            .get_pd_server_info(&data.client, &req)
+            .await
+    } else {
+        // Regular mode - return first server's info
+        data.router
+            .route_to_first(&data.client, "/get_server_info", &req)
+            .await
+    }
 }
 
 #[get("/v1/models")]
 async fn v1_models(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
-    data.router
-        .route_to_first(&data.client, "/v1/models", &req)
-        .await
+    if data.router.is_prefill_decode() {
+        // For PD mode, return models from the first prefill server
+        data.router
+            .get_pd_models(&data.client, &req)
+            .await
+    } else {
+        // Regular mode
+        data.router
+            .route_to_first(&data.client, "/v1/models", &req)
+            .await
+    }
 }
 
 #[get("/get_model_info")]
@@ -87,9 +113,23 @@ async fn get_model_info(req: HttpRequest, data: web::Data<AppState>) -> impl Res
 
 #[post("/generate")]
 async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> impl Responder {
-    data.router
-        .route_generate_request(&data.client, &req, &body, "/generate")
-        .await
+    // For PD mode, we should use typed request handling
+    if data.router.is_prefill_decode() {
+        // Parse as typed request for PD mode
+        match serde_json::from_slice::<GenerateReqInput>(&body) {
+            Ok(typed_req) => {
+                data.router
+                    .route_pd_generate_typed(&data.client, &req, typed_req, "/generate")
+                    .await
+            }
+            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
+        }
+    } else {
+        // Regular mode - use existing logic
+        data.router
+            .route_generate_request(&data.client, &req, &body, "/generate")
+            .await
+    }
 }
 
 #[post("/v1/chat/completions")]
@@ -98,9 +138,23 @@ async fn v1_chat_completions(
     body: Bytes,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    data.router
-        .route_generate_request(&data.client, &req, &body, "/v1/chat/completions")
-        .await
+    // For PD mode, we should use typed request handling
+    if data.router.is_prefill_decode() {
+        // Parse as typed request for PD mode
+        match serde_json::from_slice::<ChatReqInput>(&body) {
+            Ok(typed_req) => {
+                data.router
+                    .route_pd_chat_typed(&data.client, &req, typed_req, "/v1/chat/completions")
+                    .await
+            }
+            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
+        }
+    } else {
+        // Regular mode - use existing logic
+        data.router
+            .route_generate_request(&data.client, &req, &body, "/v1/chat/completions")
+            .await
+    }
 }
 
 #[post("/v1/completions")]
@@ -109,9 +163,23 @@ async fn v1_completions(
     body: Bytes,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    data.router
-        .route_generate_request(&data.client, &req, &body, "/v1/completions")
-        .await
+    // For PD mode, we should use typed request handling
+    if data.router.is_prefill_decode() {
+        // Parse as typed request for PD mode - reuse GenerateReqInput
+        match serde_json::from_slice::<GenerateReqInput>(&body) {
+            Ok(typed_req) => {
+                data.router
+                    .route_pd_generate_typed(&data.client, &req, typed_req, "/v1/completions")
+                    .await
+            }
+            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
+        }
+    } else {
+        // Regular mode - use existing logic
+        data.router
+            .route_generate_request(&data.client, &req, &body, "/v1/completions")
+            .await
+    }
 }
 
 #[post("/add_worker")]
