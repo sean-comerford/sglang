@@ -685,26 +685,23 @@ impl PDRouter {
     }
 
     pub async fn get_server_info(&self, client: &reqwest::Client) -> HttpResponse {
-        let mut prefill_infos = Vec::new();
+        // Get info from all decode servers (where generation happens)
+        let mut all_internal_states = Vec::new();
         let mut decode_infos = Vec::new();
-        
-        for worker in self.prefill_workers.read().unwrap().iter() {
-            match client.get(&format!("{}/get_server_info", worker.url)).send().await {
-                Ok(res) if res.status().is_success() => {
-                    match res.json::<Value>().await {
-                        Ok(info) => prefill_infos.push(info),
-                        Err(e) => error!("Failed to parse server info: {}", e),
-                    }
-                }
-                _ => {}
-            }
-        }
         
         for worker in self.decode_workers.read().unwrap().iter() {
             match client.get(&format!("{}/get_server_info", worker.url)).send().await {
                 Ok(res) if res.status().is_success() => {
                     match res.json::<Value>().await {
-                        Ok(info) => decode_infos.push(info),
+                        Ok(info) => {
+                            // Extract internal_states from each decode server
+                            if let Some(states) = info.get("internal_states") {
+                                if let Some(states_array) = states.as_array() {
+                                    all_internal_states.extend(states_array.clone());
+                                }
+                            }
+                            decode_infos.push(info);
+                        }
                         Err(e) => error!("Failed to parse server info: {}", e),
                     }
                 }
@@ -712,10 +709,24 @@ impl PDRouter {
             }
         }
         
-        HttpResponse::Ok().json(serde_json::json!({
-            "prefill": prefill_infos,
-            "decode": decode_infos,
-        }))
+        // If we have internal states, return in the format expected by bench_one_batch_server.py
+        if !all_internal_states.is_empty() {
+            // Use the first decode server's internal state (they should all be similar)
+            HttpResponse::Ok().json(serde_json::json!({
+                "internal_states": all_internal_states,
+                // Include original format for compatibility
+                "decode_servers": decode_infos,
+            }))
+        } else {
+            // Fallback: create a dummy internal_states entry
+            HttpResponse::Ok().json(serde_json::json!({
+                "internal_states": [{
+                    "last_gen_throughput": 0.0,
+                    "avg_spec_accept_length": null,
+                }],
+                "decode_servers": decode_infos,
+            }))
+        }
     }
 
     pub async fn get_models(&self, client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
