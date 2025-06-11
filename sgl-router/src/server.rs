@@ -47,8 +47,21 @@ async fn sink_handler(_req: HttpRequest, mut payload: web::Payload) -> Result<Ht
 }
 
 // Custom error handler for JSON payload errors.
-fn json_error_handler(_err: error::JsonPayloadError, _req: &HttpRequest) -> Error {
-    error::ErrorPayloadTooLarge("Payload too large")
+fn json_error_handler(err: error::JsonPayloadError, _req: &HttpRequest) -> Error {
+    error!("JSON payload error: {:?}", err);
+    match &err {
+        error::JsonPayloadError::OverflowKnownLength { length, limit } => {
+            error!("Payload too large: {} bytes exceeds limit of {} bytes", length, limit);
+            error::ErrorPayloadTooLarge(format!("Payload too large: {} bytes exceeds limit of {} bytes", length, limit))
+        }
+        error::JsonPayloadError::Overflow { limit } => {
+            error!("Payload overflow: exceeds limit of {} bytes", limit);
+            error::ErrorPayloadTooLarge(format!("Payload exceeds limit of {} bytes", limit))
+        }
+        _ => {
+            error::ErrorBadRequest(format!("Invalid JSON payload: {}", err))
+        }
+    }
 }
 
 #[get("/health")]
@@ -106,9 +119,16 @@ async fn v1_models(req: HttpRequest, data: web::Data<AppState>) -> impl Responde
 
 #[get("/get_model_info")]
 async fn get_model_info(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
-    data.router
-        .route_to_first(&data.client, "/get_model_info", &req)
-        .await
+    if data.router.is_prefill_decode() {
+        // For PD mode, get model info from the first prefill server
+        data.router
+            .get_pd_model_info(&data.client, &req)
+            .await
+    } else {
+        data.router
+            .route_to_first(&data.client, "/get_model_info", &req)
+            .await
+    }
 }
 
 #[post("/generate")]
@@ -389,6 +409,8 @@ pub async fn startup(config: ServerConfig) -> std::io::Result<()> {
             .service(list_workers)
             .service(flush_cache)
             .service(get_loads)
+            // Note: /register endpoint for dynamic PD server registration not implemented yet
+            // This would require modifying PDRouter to support dynamic worker addition
             // Default handler for unmatched routes.
             .default_service(web::route().to(sink_handler))
     })

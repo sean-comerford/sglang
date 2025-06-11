@@ -27,6 +27,12 @@ pub struct PDRouter {
 }
 
 impl PDRouter {
+    // TODO: Add methods for dynamic worker management to support /register endpoint:
+    // - add_prefill_server(url: String, bootstrap_port: Option<u16>)
+    // - add_decode_server(url: String)
+    // - remove_prefill_server(url: &str)
+    // - remove_decode_server(url: &str)
+    
     pub fn new(
         prefill_urls: Vec<(String, Option<u16>)>,
         decode_urls: Vec<String>,
@@ -644,11 +650,13 @@ impl PDRouter {
         
         for worker in self.prefill_workers.read().unwrap().iter() {
             let url = format!("{}/health_generate", worker.url);
+            // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
             tasks.push(client.get(&url).send());
         }
         
         for worker in self.decode_workers.read().unwrap().iter() {
             let url = format!("{}/health_generate", worker.url);
+            // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
             tasks.push(client.get(&url).send());
         }
 
@@ -767,6 +775,36 @@ impl PDRouter {
             "prefill": prefill_loads,
             "decode": decode_loads
         }))
+    }
+
+    pub async fn get_model_info(&self, client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
+        // Get model info from the first prefill server (matches original Rust PDLB behavior)
+        if let Ok(workers) = self.prefill_workers.read() {
+            if let Some(first_worker) = workers.first() {
+                let mut request_builder = client.get(format!("{}/get_model_info", first_worker.url));
+                for (name, value) in crate::router::copy_request_headers(req) {
+                    if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                        request_builder = request_builder.header(&name, &value);
+                    }
+                }
+                match request_builder.send().await {
+                    Ok(res) => {
+                        let status = actix_web::http::StatusCode::from_u16(res.status().as_u16())
+                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                        match res.bytes().await {
+                            Ok(body) => HttpResponse::build(status).body(body.to_vec()),
+                            Err(e) => HttpResponse::InternalServerError()
+                                .body(format!("Failed to read response body: {}", e)),
+                        }
+                    }
+                    Err(e) => HttpResponse::InternalServerError().body(format!("Failed to send request: {}", e)),
+                }
+            } else {
+                HttpResponse::ServiceUnavailable().body("No prefill servers available")
+            }
+        } else {
+            HttpResponse::InternalServerError().body("Failed to access prefill workers")
+        }
     }
 
     pub async fn flush_cache(&self, client: &reqwest::Client) -> HttpResponse {

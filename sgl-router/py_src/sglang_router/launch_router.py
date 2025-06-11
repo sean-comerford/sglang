@@ -47,7 +47,7 @@ class RouterArgs:
     balance_rel_threshold: float = 1.0001
     eviction_interval: int = 60
     max_tree_size: int = 2**24
-    max_payload_size: int = 4 * 1024 * 1024  # 4MB
+    max_payload_size: int = 256 * 1024 * 1024  # 256MB default for large batches
     verbose: bool = False
     log_dir: Optional[str] = None
     # Service discovery configuration

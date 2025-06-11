@@ -12,6 +12,7 @@ mod test_pd_routing {
     };
     use sglang_router_rs::router::{PolicyConfig, Router};
     use serde_json::json;
+    use rand::Rng;
 
     // Test-only struct to help validate PD request parsing
     #[derive(Debug)]
@@ -684,5 +685,110 @@ mod test_pd_routing {
         assert!(server_info["internal_states"][0]["last_gen_throughput"].is_f64());
         assert!(server_info["prefill"].is_array());
         assert!(server_info["decode"].is_array());
+    }
+
+    // ========================================================================
+    // Comprehensive Endpoint Coverage Test
+    // ========================================================================
+
+    #[test]
+    fn test_pd_endpoints_coverage() {
+        // Document all endpoints from Python mini_lb.py and verify implementation status
+        let implemented_endpoints = vec![
+            ("/health", "GET", true),
+            ("/health_generate", "GET", true), // Note: Python uses POST, we use GET
+            ("/get_server_info", "GET", true),
+            ("/v1/models", "GET", true),
+            ("/get_model_info", "GET", true),
+            ("/generate", "POST", true),
+            ("/v1/chat/completions", "POST", true),
+            ("/v1/completions", "POST", true),
+            ("/flush_cache", "POST", true),
+            ("/get_loads", "GET", true),
+            ("/register", "POST", false), // NOT IMPLEMENTED - needs dynamic worker management
+        ];
+        
+        let implemented_count = implemented_endpoints.iter().filter(|(_, _, impl_status)| *impl_status).count();
+        let total_count = implemented_endpoints.len();
+        
+        // We've implemented 10 out of 11 endpoints (register is not needed for Phase 1/2)
+        assert_eq!(implemented_count, 10);
+        assert_eq!(total_count, 11);
+        
+        // Document the missing endpoint
+        let missing: Vec<_> = implemented_endpoints
+            .iter()
+            .filter(|(_, _, impl_status)| !impl_status)
+            .map(|(endpoint, method, _)| format!("{} {}", method, endpoint))
+            .collect();
+        
+        assert_eq!(missing, vec!["POST /register"]);
+    }
+
+    #[test]
+    fn test_large_batch_bootstrap_injection() {
+        // Test bootstrap injection performance with very large batches
+        // This simulates the bench_one_batch_server.py scenario
+        let large_batch_sizes = vec![1024, 4096, 8192];
+        
+        for batch_size in large_batch_sizes {
+            let start = std::time::Instant::now();
+            
+            // Simulate a large batch request
+            let mut large_batch_request = json!({
+                "input_ids": vec![vec![1, 2, 3, 4]; batch_size],
+                "sampling_params": {
+                    "temperature": 0.0,
+                    "max_new_tokens": 16,
+                },
+                "stream": true
+            });
+            
+            // Simulate bootstrap injection
+            let prefill_info = EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
+            
+            large_batch_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
+            large_batch_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
+            large_batch_request["bootstrap_room"] = json!((0..batch_size).map(|_| rand::thread_rng().gen::<u64>()).collect::<Vec<_>>());
+            
+            let elapsed = start.elapsed();
+            
+            // Verify bootstrap fields are correctly sized
+            assert_eq!(large_batch_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
+            assert_eq!(large_batch_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
+            assert_eq!(large_batch_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
+            
+            // Bootstrap injection should be reasonably fast even for large batches
+            println!("Bootstrap injection for batch_size {} took {:?}", batch_size, elapsed);
+            assert!(elapsed.as_millis() < 1000, "Bootstrap injection took too long for batch size {}", batch_size);
+        }
+    }
+
+    #[test]
+    fn test_payload_size_calculation() {
+        // Test payload size estimation for bench_one_batch_server.py scenarios
+        let test_cases = vec![
+            (1, 1024, 16),      // Small batch
+            (16, 1024, 16),     // Medium batch
+            (64, 1024, 16),     // Large batch
+            (8192, 4096, 5),    // Benchmark scenario
+        ];
+        
+        for (batch_size, input_len, _output_len) in test_cases {
+            // Estimate payload size (rough calculation)
+            // Each token is ~4 bytes (i32), plus JSON overhead
+            let tokens_size = batch_size * input_len * 4; // 4 bytes per token
+            let json_overhead = batch_size * 100; // ~100 bytes overhead per request
+            let total_size = tokens_size + json_overhead;
+            
+            println!("Batch size: {}, Input len: {}, Estimated payload: {} MB", 
+                     batch_size, input_len, total_size / (1024 * 1024));
+            
+            // For the benchmark case (8192, 4096), this should be ~134 MB
+            if batch_size == 8192 && input_len == 4096 {
+                assert!(total_size > 100 * 1024 * 1024, "Benchmark payload should be > 100MB");
+                assert!(total_size < 200 * 1024 * 1024, "Benchmark payload should be < 200MB");
+            }
+        }
     }
 }

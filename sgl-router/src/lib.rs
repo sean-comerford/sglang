@@ -64,7 +64,7 @@ impl Router {
         balance_rel_threshold = 1.0001,
         eviction_interval_secs = 60,
         max_tree_size = 2usize.pow(24),
-        max_payload_size = 4 * 1024 * 1024,
+        max_payload_size = 256 * 1024 * 1024,  // 256MB default for large batches
         verbose = false,
         log_dir = None,
         service_discovery = false,
@@ -192,7 +192,7 @@ impl Router {
             balance_rel_threshold,
             eviction_interval_secs,
             max_tree_size,
-            max_payload_size: 4 * 1024 * 1024, // 4MB default
+            max_payload_size: 256 * 1024 * 1024, // 256MB default for large batches
             verbose,
             log_dir,
             service_discovery: false, // Not supported in PD mode yet

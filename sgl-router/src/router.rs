@@ -1184,4 +1184,17 @@ impl Router {
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
+
+    pub async fn get_pd_model_info(
+        &self,
+        client: &reqwest::Client,
+        req: &HttpRequest,
+    ) -> HttpResponse {
+        match self {
+            Router::PrefillDecode { pd_router } => {
+                pd_router.get_model_info(client, req).await
+            }
+            _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
+        }
+    }
 }
