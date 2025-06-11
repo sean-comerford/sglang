@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 pub mod logging;
 use std::collections::HashMap;
+pub mod pd_router;
 pub mod pd_types;
 pub mod prometheus;
 pub mod router;

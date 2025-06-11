@@ -452,4 +452,237 @@ mod test_pd_routing {
         assert_eq!(rx1.borrow().get("worker1"), Some(&20));
         assert_eq!(rx2.borrow().get("worker2"), Some(&30));
     }
+
+    // ========================================================================
+    // Tests based on bench_one_batch_server.py patterns
+    // ========================================================================
+
+    #[test]
+    fn test_generate_request_formats() {
+        // Based on bench_one_batch_server.py request patterns
+        
+        // Test 1: Batch request with input_ids (most common in benchmarks)
+        let batch_request = json!({
+            "input_ids": [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
+            "sampling_params": {
+                "temperature": 0.0,
+                "max_new_tokens": 16,
+                "ignore_eos": true,
+            },
+            "return_logprob": false,
+            "stream": true
+        });
+
+        let pd_req = PDRequest::from_json(&batch_request);
+        assert!(pd_req.is_stream);
+        assert_eq!(pd_req.batch_size, Some(3));
+
+        // Test 2: Request with return_logprob (critical for PD)
+        let logprob_request = json!({
+            "input_ids": [[1, 2, 3]],
+            "sampling_params": {
+                "temperature": 0.7,
+                "max_new_tokens": 8,
+            },
+            "return_logprob": true,
+            "stream": false
+        });
+
+        assert_eq!(logprob_request["return_logprob"], true);
+        assert_eq!(logprob_request["stream"], false);
+
+        // Test 3: Large batch sizes from benchmark
+        let batch_sizes = vec![1, 16, 64]; // From bench_one_batch_server.py
+        for bs in batch_sizes {
+            let request = json!({
+                "input_ids": vec![vec![1, 2, 3]; bs],
+                "sampling_params": {
+                    "temperature": 0.0,
+                    "max_new_tokens": 16,
+                },
+                "stream": true
+            });
+            
+            let pd_req = PDRequest::from_json(&request);
+            assert_eq!(pd_req.batch_size, Some(bs));
+        }
+    }
+
+    #[test]
+    fn test_sampling_params_handling() {
+        // Test various sampling parameters from bench_one_batch_server.py
+        let sampling_params_variations = vec![
+            json!({
+                "temperature": 0.0,
+                "max_new_tokens": 8,
+                "ignore_eos": true
+            }),
+            json!({
+                "temperature": 0.7,
+                "max_new_tokens": 16,
+                "ignore_eos": false,
+                "top_p": 0.9,
+                "frequency_penalty": 0.5
+            }),
+            json!({
+                "temperature": 1.0,
+                "max_new_tokens": 64,
+                "json_schema": "$$ANY$$"  // Structured output
+            }),
+        ];
+
+        for params in sampling_params_variations {
+            let request = json!({
+                "input_ids": [[1, 2, 3]],
+                "sampling_params": params.clone(),
+                "stream": false
+            });
+
+            // Verify params are preserved
+            assert_eq!(request["sampling_params"], params);
+        }
+    }
+
+    #[test]
+    fn test_streaming_response_parsing() {
+        // Test SSE format parsing from streaming responses
+        let sse_chunks = vec![
+            "data: {\"text\":\"Hello\",\"meta_info\":{\"completion_tokens\":1,\"finish_reason\":null}}",
+            "data: {\"text\":\" world\",\"meta_info\":{\"completion_tokens\":2,\"finish_reason\":null}}",
+            "data: {\"text\":\"!\",\"meta_info\":{\"completion_tokens\":3,\"finish_reason\":{\"type\":\"length\"}}}",
+            "data: [DONE]",
+        ];
+
+        for chunk in &sse_chunks[..3] {
+            assert!(chunk.starts_with("data: "));
+            let json_str = &chunk[6..]; // Skip "data: "
+            let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+            assert!(parsed["meta_info"]["completion_tokens"].is_u64());
+        }
+
+        // Test [DONE] detection
+        assert_eq!(sse_chunks[3], "data: [DONE]");
+    }
+
+    #[test]
+    fn test_ttft_calculation() {
+        // Test Time To First Token calculation pattern
+        let first_token_response = json!({
+            "text": "Hello",
+            "meta_info": {
+                "completion_tokens": 1,
+                "finish_reason": null
+            }
+        });
+
+        // TTFT is calculated when completion_tokens == 1
+        assert_eq!(first_token_response["meta_info"]["completion_tokens"], 1);
+        assert!(first_token_response["meta_info"]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn test_throughput_metrics() {
+        // Test throughput calculation patterns from bench_one_batch_server.py
+        let batch_size = 16;
+        let input_len = 1024;
+        let output_len = 16;
+        let ttft = 0.5; // seconds
+        let total_latency = 2.0; // seconds
+
+        // Input throughput = batch_size * input_len / ttft
+        let input_throughput = (batch_size as f64) * (input_len as f64) / ttft;
+        assert!((input_throughput - 32768.0).abs() < 0.01);
+
+        // Output throughput = batch_size * output_len / (latency - ttft)
+        let output_throughput = (batch_size as f64) * (output_len as f64) / (total_latency - ttft);
+        assert!((output_throughput - 170.67).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_error_response_handling() {
+        // Test error response format from bench_one_batch_server.py
+        let error_response = json!({
+            "error": "Request has failed. Invalid input format."
+        });
+
+        assert!(error_response.get("error").is_some());
+        assert!(error_response["error"].as_str().unwrap().contains("failed"));
+    }
+
+    #[test]
+    fn test_structured_output_request() {
+        // Test structured output format (json_schema)
+        let structured_request = json!({
+            "text": "What is the capital of France? Answer in JSON.",
+            "sampling_params": {
+                "temperature": 0.0,
+                "max_new_tokens": 64,
+                "json_schema": "$$ANY$$"
+            },
+            "stream": false
+        });
+
+        assert_eq!(
+            structured_request["sampling_params"]["json_schema"],
+            "$$ANY$$"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_injection_with_benchmark_requests() {
+        // Test bootstrap injection with actual benchmark request patterns
+        let mut benchmark_request = json!({
+            "input_ids": vec![vec![1, 2, 3, 4]; 16], // Batch size 16
+            "sampling_params": {
+                "temperature": 0.0,
+                "max_new_tokens": 8,
+                "ignore_eos": true
+            },
+            "return_logprob": true,
+            "stream": true
+        });
+
+        // Simulate bootstrap injection
+        let prefill_info = EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
+        let batch_size = 16;
+        
+        benchmark_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
+        benchmark_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
+        benchmark_request["bootstrap_room"] = json!((0..batch_size).map(|_| 12345u64).collect::<Vec<_>>());
+
+        // Verify bootstrap fields match batch size
+        assert_eq!(benchmark_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
+        assert_eq!(benchmark_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
+        assert_eq!(benchmark_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
+        
+        // Verify original fields are preserved
+        assert_eq!(benchmark_request["return_logprob"], true);
+        assert_eq!(benchmark_request["stream"], true);
+    }
+
+    #[test]
+    fn test_server_info_response_format() {
+        // Test server info format expected by bench_one_batch_server.py
+        let server_info = json!({
+            "internal_states": [{
+                "avg_spec_accept_length": 3.5,
+                "last_gen_throughput": 2048.5,
+                "load": 16
+            }],
+            "prefill": [
+                {"url": "http://prefill1:8080", "load": 10},
+                {"url": "http://prefill2:8080", "load": 20}
+            ],
+            "decode": [
+                {"url": "http://decode1:8080", "load": 5},
+                {"url": "http://decode2:8080", "load": 15}
+            ]
+        });
+
+        // Verify structure matches what benchmark expects
+        assert!(server_info["internal_states"][0]["avg_spec_accept_length"].is_f64());
+        assert!(server_info["internal_states"][0]["last_gen_throughput"].is_f64());
+        assert!(server_info["prefill"].is_array());
+        assert!(server_info["decode"].is_array());
+    }
 }

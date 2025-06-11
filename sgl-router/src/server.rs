@@ -118,11 +118,31 @@ async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> i
         // Parse as typed request for PD mode
         match serde_json::from_slice::<GenerateReqInput>(&body) {
             Ok(typed_req) => {
+                // Debug logging to understand the request structure
+                info!("PD generate request - batch_size: {:?}", typed_req.get_batch_size());
+                if let Some(input_ids) = &typed_req.input_ids {
+                    match input_ids {
+                        crate::pd_types::SingleOrBatch::Single(ids) => {
+                            info!("Single request with {} tokens", ids.len());
+                        }
+                        crate::pd_types::SingleOrBatch::Batch(batch) => {
+                            info!("Batch request with {} sequences", batch.len());
+                        }
+                    }
+                }
+                
                 data.router
                     .route_pd_generate_typed(&data.client, &req, typed_req, "/generate")
                     .await
             }
-            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
+            Err(e) => {
+                error!("Failed to parse GenerateReqInput: {}", e);
+                // Log the raw body for debugging
+                if let Ok(body_str) = std::str::from_utf8(&body) {
+                    error!("Raw body: {}", body_str);
+                }
+                HttpResponse::BadRequest().body(format!("Invalid request: {}", e))
+            }
         }
     } else {
         // Regular mode - use existing logic
@@ -223,10 +243,17 @@ async fn remove_worker(
 
 #[post("/flush_cache")]
 async fn flush_cache(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
-    // Route to all workers for cache flushing
-    data.router
-        .route_to_all(&data.client, "/flush_cache", &req)
-        .await
+    if data.router.is_prefill_decode() {
+        // For PD mode, flush cache on both prefill and decode servers
+        data.router
+            .route_pd_flush_cache(&data.client)
+            .await
+    } else {
+        // Route to all workers for cache flushing
+        data.router
+            .route_to_all(&data.client, "/flush_cache", &req)
+            .await
+    }
 }
 
 #[get("/get_loads")]
