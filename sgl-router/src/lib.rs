@@ -230,13 +230,19 @@ impl Router {
             PolicyType::PrefillDecode => {
                 // Handle PD mode
                 let prefill_urls = self.prefill_urls.as_ref().ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err("PrefillDecode mode requires prefill_urls")
+                    pyo3::exceptions::PyValueError::new_err(
+                        "PrefillDecode mode requires prefill_urls",
+                    )
                 })?;
                 let decode_urls = self.decode_urls.as_ref().ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err("PrefillDecode mode requires decode_urls")
+                    pyo3::exceptions::PyValueError::new_err(
+                        "PrefillDecode mode requires decode_urls",
+                    )
                 })?;
                 let selection_policy = self.pd_selection_policy.as_ref().ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err("PrefillDecode mode requires pd_selection_policy")
+                    pyo3::exceptions::PyValueError::new_err(
+                        "PrefillDecode mode requires pd_selection_policy",
+                    )
                 })?;
 
                 router::PolicyConfig::PrefillDecodeConfig {

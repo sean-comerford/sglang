@@ -1,4 +1,5 @@
 use crate::logging::{self, LoggingConfig};
+use crate::pd_types::{ChatReqInput, GenerateReqInput};
 use crate::prometheus::{self, PrometheusConfig};
 use crate::router::PolicyConfig;
 use crate::router::Router;
@@ -15,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::spawn;
 use tracing::{error, info, warn, Level};
-use crate::pd_types::{GenerateReqInput, ChatReqInput};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -51,16 +51,20 @@ fn json_error_handler(err: error::JsonPayloadError, _req: &HttpRequest) -> Error
     error!("JSON payload error: {:?}", err);
     match &err {
         error::JsonPayloadError::OverflowKnownLength { length, limit } => {
-            error!("Payload too large: {} bytes exceeds limit of {} bytes", length, limit);
-            error::ErrorPayloadTooLarge(format!("Payload too large: {} bytes exceeds limit of {} bytes", length, limit))
+            error!(
+                "Payload too large: {} bytes exceeds limit of {} bytes",
+                length, limit
+            );
+            error::ErrorPayloadTooLarge(format!(
+                "Payload too large: {} bytes exceeds limit of {} bytes",
+                length, limit
+            ))
         }
         error::JsonPayloadError::Overflow { limit } => {
             error!("Payload overflow: exceeds limit of {} bytes", limit);
             error::ErrorPayloadTooLarge(format!("Payload exceeds limit of {} bytes", limit))
         }
-        _ => {
-            error::ErrorBadRequest(format!("Invalid JSON payload: {}", err))
-        }
+        _ => error::ErrorBadRequest(format!("Invalid JSON payload: {}", err)),
     }
 }
 
@@ -91,9 +95,7 @@ async fn health_generate(req: HttpRequest, data: web::Data<AppState>) -> impl Re
 async fn get_server_info(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if data.router.is_prefill_decode() {
         // For PD mode, aggregate info from both prefill and decode servers
-        data.router
-            .get_pd_server_info(&data.client, &req)
-            .await
+        data.router.get_pd_server_info(&data.client, &req).await
     } else {
         // Regular mode - return first server's info
         data.router
@@ -106,9 +108,7 @@ async fn get_server_info(req: HttpRequest, data: web::Data<AppState>) -> impl Re
 async fn v1_models(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if data.router.is_prefill_decode() {
         // For PD mode, return models from the first prefill server
-        data.router
-            .get_pd_models(&data.client, &req)
-            .await
+        data.router.get_pd_models(&data.client, &req).await
     } else {
         // Regular mode
         data.router
@@ -121,9 +121,7 @@ async fn v1_models(req: HttpRequest, data: web::Data<AppState>) -> impl Responde
 async fn get_model_info(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if data.router.is_prefill_decode() {
         // For PD mode, get model info from the first prefill server
-        data.router
-            .get_pd_model_info(&data.client, &req)
-            .await
+        data.router.get_pd_model_info(&data.client, &req).await
     } else {
         data.router
             .route_to_first(&data.client, "/get_model_info", &req)
@@ -139,7 +137,10 @@ async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> i
         match serde_json::from_slice::<GenerateReqInput>(&body) {
             Ok(typed_req) => {
                 // Debug logging to understand the request structure
-                info!("PD generate request - batch_size: {:?}", typed_req.get_batch_size());
+                info!(
+                    "PD generate request - batch_size: {:?}",
+                    typed_req.get_batch_size()
+                );
                 if let Some(input_ids) = &typed_req.input_ids {
                     match input_ids {
                         crate::pd_types::SingleOrBatch::Single(ids) => {
@@ -265,9 +266,7 @@ async fn remove_worker(
 async fn flush_cache(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if data.router.is_prefill_decode() {
         // For PD mode, flush cache on both prefill and decode servers
-        data.router
-            .route_pd_flush_cache(&data.client)
-            .await
+        data.router.route_pd_flush_cache(&data.client).await
     } else {
         // Route to all workers for cache flushing
         data.router
@@ -279,9 +278,7 @@ async fn flush_cache(req: HttpRequest, data: web::Data<AppState>) -> impl Respon
 #[get("/get_loads")]
 async fn get_loads(req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     // Get loads from all workers
-    data.router
-        .get_all_loads(&data.client, &req)
-        .await
+    data.router.get_all_loads(&data.client, &req).await
 }
 
 pub struct ServerConfig {

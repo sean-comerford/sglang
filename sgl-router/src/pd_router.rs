@@ -121,7 +121,9 @@ impl PDRouter {
 
         // Get stream flag and return_logprob flag before moving the request
         let is_stream = typed_req.is_stream();
-        let return_logprob = typed_req.other.get("return_logprob")
+        let return_logprob = typed_req
+            .other
+            .get("return_logprob")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -137,7 +139,10 @@ impl PDRouter {
         };
 
         // Log routing decision
-        info!("PD routing: {} -> prefill={}, decode={}", route, prefill.url, decode.url);
+        info!(
+            "PD routing: {} -> prefill={}, decode={}",
+            route, prefill.url, decode.url
+        );
 
         // Add bootstrap info using the trait method
         if let Err(e) = typed_req.add_bootstrap_info(&prefill) {
@@ -152,8 +157,7 @@ impl PDRouter {
             Ok(json) => json,
             Err(e) => {
                 error!("Failed to serialize request: {}", e);
-                return HttpResponse::InternalServerError()
-                    .body("Failed to serialize request");
+                return HttpResponse::InternalServerError().body("Failed to serialize request");
             }
         };
 
@@ -168,7 +172,8 @@ impl PDRouter {
             is_stream,
             return_logprob,
             start,
-        ).await
+        )
+        .await
     }
 
     // Route a typed chat request
@@ -183,7 +188,9 @@ impl PDRouter {
 
         // Get stream flag and return_logprob flag before moving the request
         let is_stream = typed_req.is_stream();
-        let return_logprob = typed_req.other.get("return_logprob")
+        let return_logprob = typed_req
+            .other
+            .get("return_logprob")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -199,7 +206,10 @@ impl PDRouter {
         };
 
         // Log routing decision
-        info!("PD routing: {} -> prefill={}, decode={}", route, prefill.url, decode.url);
+        info!(
+            "PD routing: {} -> prefill={}, decode={}",
+            route, prefill.url, decode.url
+        );
 
         // Add bootstrap info using the trait method
         if let Err(e) = typed_req.add_bootstrap_info(&prefill) {
@@ -214,8 +224,7 @@ impl PDRouter {
             Ok(json) => json,
             Err(e) => {
                 error!("Failed to serialize request: {}", e);
-                return HttpResponse::InternalServerError()
-                    .body("Failed to serialize request");
+                return HttpResponse::InternalServerError().body("Failed to serialize request");
             }
         };
 
@@ -230,7 +239,8 @@ impl PDRouter {
             is_stream,
             return_logprob,
             start,
-        ).await
+        )
+        .await
     }
 
     // Execute the dual dispatch to prefill and decode servers
@@ -253,13 +263,9 @@ impl PDRouter {
         }
 
         // Build requests using .json() method
-        let mut prefill_request = client
-            .post(&prefill.api_path(route))
-            .json(&json_request);
+        let mut prefill_request = client.post(&prefill.api_path(route)).json(&json_request);
 
-        let mut decode_request = client
-            .post(&decode.api_path(route))
-            .json(&json_request);
+        let mut decode_request = client.post(&decode.api_path(route)).json(&json_request);
 
         // Copy headers from original request
         for (name, value) in crate::router::copy_request_headers(req) {
@@ -270,10 +276,8 @@ impl PDRouter {
         }
 
         // Send both requests concurrently
-        let (prefill_result, decode_result) = tokio::join!(
-            prefill_request.send(),
-            decode_request.send()
-        );
+        let (prefill_result, decode_result) =
+            tokio::join!(prefill_request.send(), decode_request.send());
 
         // Always decrement load tracking after requests complete
         if let Ok(mut tracking) = self.load_tracking.lock() {
@@ -290,8 +294,10 @@ impl PDRouter {
         histogram!("sgl_router_pd_request_duration_seconds", "route" => route.to_string())
             .record(duration.as_secs_f64());
         counter!("sgl_router_pd_requests_total", "route" => route.to_string()).increment(1);
-        counter!("sgl_router_pd_prefill_requests_total", "worker" => prefill.url.to_string()).increment(1);
-        counter!("sgl_router_pd_decode_requests_total", "worker" => decode.url.to_string()).increment(1);
+        counter!("sgl_router_pd_prefill_requests_total", "worker" => prefill.url.to_string())
+            .increment(1);
+        counter!("sgl_router_pd_decode_requests_total", "worker" => decode.url.to_string())
+            .increment(1);
 
         // Process decode response
         match decode_result {
@@ -365,59 +371,70 @@ impl PDRouter {
                                             Err(_) => {
                                                 warn!("Failed to parse prefill response for logprob merging");
                                                 HttpResponse::build(status)
-                                                    .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                                                    .streaming(
-                                                        res.bytes_stream()
-                                                            .map_err(|e| {
-                                                                actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e))
-                                                            })
-                                                    )
+                                                    .insert_header((
+                                                        CONTENT_TYPE,
+                                                        HeaderValue::from_static(
+                                                            "text/event-stream",
+                                                        ),
+                                                    ))
+                                                    .streaming(res.bytes_stream().map_err(|e| {
+                                                        actix_web::error::ErrorInternalServerError(
+                                                            format!("Stream error: {}", e),
+                                                        )
+                                                    }))
                                             }
                                         }
                                     }
                                     _ => {
                                         warn!("Failed to get prefill stream chunk");
                                         HttpResponse::build(status)
-                                            .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                                            .streaming(
-                                                res.bytes_stream()
-                                                    .map_err(|e| {
-                                                        actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e))
-                                                    })
-                                            )
+                                            .insert_header((
+                                                CONTENT_TYPE,
+                                                HeaderValue::from_static("text/event-stream"),
+                                            ))
+                                            .streaming(res.bytes_stream().map_err(|e| {
+                                                actix_web::error::ErrorInternalServerError(format!(
+                                                    "Stream error: {}",
+                                                    e
+                                                ))
+                                            }))
                                     }
                                 }
                             }
                             Err(_) => {
                                 // Prefill failed, just stream decode without merging
                                 HttpResponse::build(status)
-                                    .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                                    .streaming(
-                                        res.bytes_stream()
-                                            .map_err(|e| {
-                                                actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e))
-                                            })
-                                    )
+                                    .insert_header((
+                                        CONTENT_TYPE,
+                                        HeaderValue::from_static("text/event-stream"),
+                                    ))
+                                    .streaming(res.bytes_stream().map_err(|e| {
+                                        actix_web::error::ErrorInternalServerError(format!(
+                                            "Stream error: {}",
+                                            e
+                                        ))
+                                    }))
                             }
                         }
                     } else {
                         // No logprob merging needed
                         HttpResponse::build(status)
-                            .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                            .streaming(
-                                res.bytes_stream()
-                                    .map_err(|e| {
-                                        error!("Stream error: {}", e);
-                                        actix_web::error::ErrorInternalServerError("Stream error")
-                                    })
-                            )
+                            .insert_header((
+                                CONTENT_TYPE,
+                                HeaderValue::from_static("text/event-stream"),
+                            ))
+                            .streaming(res.bytes_stream().map_err(|e| {
+                                error!("Stream error: {}", e);
+                                actix_web::error::ErrorInternalServerError("Stream error")
+                            }))
                     }
                 } else {
                     // Non-streaming response
                     match res.bytes().await {
                         Ok(decode_body) => {
                             if return_logprob {
-                                self.merge_logprobs(prefill_result, decode_body, status).await
+                                self.merge_logprobs(prefill_result, decode_body, status)
+                                    .await
                             } else {
                                 HttpResponse::build(status).body(decode_body.to_vec())
                             }
@@ -431,7 +448,8 @@ impl PDRouter {
             }
             Err(e) => {
                 error!("Decode request failed: {}", e);
-                counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string()).increment(1);
+                counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string())
+                    .increment(1);
                 HttpResponse::BadGateway().body(format!("Decode server error: {}", e))
             }
         }
@@ -450,25 +468,26 @@ impl PDRouter {
                     Ok(prefill_body) => {
                         match (
                             serde_json::from_slice::<Value>(&prefill_body),
-                            serde_json::from_slice::<Value>(&decode_body)
+                            serde_json::from_slice::<Value>(&decode_body),
                         ) {
                             (Ok(prefill_json), Ok(mut decode_json)) => {
                                 // Merge input_token_logprobs
                                 if let (Some(prefill_meta), Some(decode_meta)) = (
                                     prefill_json.get("meta_info"),
-                                    decode_json.get_mut("meta_info")
+                                    decode_json.get_mut("meta_info"),
                                 ) {
                                     if let (Some(prefill_logprobs), Some(decode_logprobs)) = (
                                         prefill_meta.get("input_token_logprobs"),
-                                        decode_meta.get_mut("input_token_logprobs")
+                                        decode_meta.get_mut("input_token_logprobs"),
                                     ) {
                                         if let (Some(p_arr), Some(d_arr)) = (
                                             prefill_logprobs.as_array(),
-                                            decode_logprobs.as_array()
+                                            decode_logprobs.as_array(),
                                         ) {
                                             let mut merged = p_arr.clone();
                                             merged.extend(d_arr.clone());
-                                            decode_meta["input_token_logprobs"] = Value::Array(merged);
+                                            decode_meta["input_token_logprobs"] =
+                                                Value::Array(merged);
                                         }
                                     }
                                 }
@@ -496,10 +515,20 @@ impl PDRouter {
         _client: &reqwest::Client,
     ) -> Result<(EngineInfo, EngineInfo), String> {
         // Check we have workers
-        if self.prefill_workers.read().map_err(|e| format!("Failed to acquire prefill workers lock: {}", e))?.is_empty() {
+        if self
+            .prefill_workers
+            .read()
+            .map_err(|e| format!("Failed to acquire prefill workers lock: {}", e))?
+            .is_empty()
+        {
             return Err("No prefill workers available. Please check if prefill servers are configured and healthy.".to_string());
         }
-        if self.decode_workers.read().map_err(|e| format!("Failed to acquire decode workers lock: {}", e))?.is_empty() {
+        if self
+            .decode_workers
+            .read()
+            .map_err(|e| format!("Failed to acquire decode workers lock: {}", e))?
+            .is_empty()
+        {
             return Err("No decode workers available. Please check if decode servers are configured and healthy.".to_string());
         }
 
@@ -532,15 +561,33 @@ impl PDRouter {
 
         let loads = self.worker_loads.borrow();
 
-        let p1_load = loads.get(&prefill_list[p1_idx].url).copied().unwrap_or(isize::MAX);
-        let p2_load = loads.get(&prefill_list[p2_idx].url).copied().unwrap_or(isize::MAX);
-        let d1_load = loads.get(&decode_list[d1_idx].url).copied().unwrap_or(isize::MAX);
-        let d2_load = loads.get(&decode_list[d2_idx].url).copied().unwrap_or(isize::MAX);
+        let p1_load = loads
+            .get(&prefill_list[p1_idx].url)
+            .copied()
+            .unwrap_or(isize::MAX);
+        let p2_load = loads
+            .get(&prefill_list[p2_idx].url)
+            .copied()
+            .unwrap_or(isize::MAX);
+        let d1_load = loads
+            .get(&decode_list[d1_idx].url)
+            .copied()
+            .unwrap_or(isize::MAX);
+        let d2_load = loads
+            .get(&decode_list[d2_idx].url)
+            .copied()
+            .unwrap_or(isize::MAX);
 
         debug!(
             "Power-of-two selection - Prefill: {}={} vs {}={} | Decode: {}={} vs {}={}",
-            prefill_list[p1_idx].url, p1_load, prefill_list[p2_idx].url, p2_load,
-            decode_list[d1_idx].url, d1_load, decode_list[d2_idx].url, d2_load
+            prefill_list[p1_idx].url,
+            p1_load,
+            prefill_list[p2_idx].url,
+            p2_load,
+            decode_list[d1_idx].url,
+            d1_load,
+            decode_list[d2_idx].url,
+            d2_load
         );
 
         let selected_prefill = if p1_load <= p2_load {
@@ -572,7 +619,8 @@ impl PDRouter {
         loop {
             let mut loads = HashMap::new();
 
-            let futures: Vec<_> = worker_urls.iter()
+            let futures: Vec<_> = worker_urls
+                .iter()
                 .map(|url| {
                     let client = client.clone();
                     let url = url.clone();
@@ -611,27 +659,28 @@ fn get_two_random_indices(len: usize) -> (usize, usize) {
 
 async fn get_worker_load(client: &reqwest::Client, worker_url: &str) -> Option<isize> {
     match client.get(&format!("{}/get_load", worker_url)).send().await {
-        Ok(res) if res.status().is_success() => {
-            match res.bytes().await {
-                Ok(bytes) => {
-                    match serde_json::from_slice::<Value>(&bytes) {
-                        Ok(data) => data.get("load")
-                            .and_then(|v| v.as_i64())
-                            .map(|v| v as isize),
-                        Err(e) => {
-                            debug!("Failed to parse load response from {}: {}", worker_url, e);
-                            None
-                        }
-                    }
-                }
+        Ok(res) if res.status().is_success() => match res.bytes().await {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(data) => data
+                    .get("load")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as isize),
                 Err(e) => {
-                    debug!("Failed to read load response from {}: {}", worker_url, e);
+                    debug!("Failed to parse load response from {}: {}", worker_url, e);
                     None
                 }
+            },
+            Err(e) => {
+                debug!("Failed to read load response from {}: {}", worker_url, e);
+                None
             }
-        }
+        },
         Ok(res) => {
-            debug!("Worker {} returned non-success status: {}", worker_url, res.status());
+            debug!(
+                "Worker {} returned non-success status: {}",
+                worker_url,
+                res.status()
+            );
             None
         }
         Err(e) => {
@@ -664,11 +713,15 @@ impl PDRouter {
 
         for (i, result) in results.into_iter().enumerate() {
             match result {
-                Ok(res) if res.status().is_success() => {},
+                Ok(res) if res.status().is_success() => {}
                 Ok(res) => {
                     all_healthy = false;
-                    unhealthy_servers.push(format!("Server {} returned status {}", i, res.status()));
-                },
+                    unhealthy_servers.push(format!(
+                        "Server {} returned status {}",
+                        i,
+                        res.status()
+                    ));
+                }
                 Err(e) => {
                     all_healthy = false;
                     unhealthy_servers.push(format!("Server {} error: {}", i, e));
@@ -690,7 +743,11 @@ impl PDRouter {
         let mut decode_infos = Vec::new();
 
         for worker in self.decode_workers.read().unwrap().iter() {
-            match client.get(&format!("{}/get_server_info", worker.url)).send().await {
+            match client
+                .get(&format!("{}/get_server_info", worker.url))
+                .send()
+                .await
+            {
                 Ok(res) if res.status().is_success() => {
                     match res.json::<Value>().await {
                         Ok(info) => {
@@ -735,7 +792,9 @@ impl PDRouter {
                 // Send request directly without going through Router
                 let mut request_builder = client.get(format!("{}/v1/models", first_worker.url));
                 for (name, value) in crate::router::copy_request_headers(req) {
-                    if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                    if name.to_lowercase() != "content-type"
+                        && name.to_lowercase() != "content-length"
+                    {
                         request_builder = request_builder.header(&name, &value);
                     }
                 }
@@ -749,7 +808,8 @@ impl PDRouter {
                                 .body(format!("Failed to read response body: {}", e)),
                         }
                     }
-                    Err(e) => HttpResponse::InternalServerError().body(format!("Failed to send request: {}", e)),
+                    Err(e) => HttpResponse::InternalServerError()
+                        .body(format!("Failed to send request: {}", e)),
                 }
             } else {
                 HttpResponse::ServiceUnavailable().body("No prefill servers available")
@@ -760,8 +820,20 @@ impl PDRouter {
     }
 
     pub async fn get_loads(&self, client: &reqwest::Client) -> HttpResponse {
-        let p_urls: Vec<_> = self.prefill_workers.read().unwrap().iter().map(|w| w.url.clone()).collect();
-        let d_urls: Vec<_> = self.decode_workers.read().unwrap().iter().map(|w| w.url.clone()).collect();
+        let p_urls: Vec<_> = self
+            .prefill_workers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|w| w.url.clone())
+            .collect();
+        let d_urls: Vec<_> = self
+            .decode_workers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|w| w.url.clone())
+            .collect();
 
         let mut prefill_loads = Vec::new();
         let mut decode_loads = Vec::new();
@@ -788,13 +860,20 @@ impl PDRouter {
         }))
     }
 
-    pub async fn get_model_info(&self, client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
+    pub async fn get_model_info(
+        &self,
+        client: &reqwest::Client,
+        req: &HttpRequest,
+    ) -> HttpResponse {
         // Get model info from the first prefill server (matches original Rust PDLB behavior)
         if let Ok(workers) = self.prefill_workers.read() {
             if let Some(first_worker) = workers.first() {
-                let mut request_builder = client.get(format!("{}/get_model_info", first_worker.url));
+                let mut request_builder =
+                    client.get(format!("{}/get_model_info", first_worker.url));
                 for (name, value) in crate::router::copy_request_headers(req) {
-                    if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                    if name.to_lowercase() != "content-type"
+                        && name.to_lowercase() != "content-length"
+                    {
                         request_builder = request_builder.header(&name, &value);
                     }
                 }
@@ -808,7 +887,8 @@ impl PDRouter {
                                 .body(format!("Failed to read response body: {}", e)),
                         }
                     }
-                    Err(e) => HttpResponse::InternalServerError().body(format!("Failed to send request: {}", e)),
+                    Err(e) => HttpResponse::InternalServerError()
+                        .body(format!("Failed to send request: {}", e)),
                 }
             } else {
                 HttpResponse::ServiceUnavailable().body("No prefill servers available")
@@ -838,11 +918,15 @@ impl PDRouter {
         let mut all_success = true;
         for (i, result) in results.into_iter().enumerate() {
             match result {
-                Ok(res) if res.status().is_success() => {},
+                Ok(res) if res.status().is_success() => {}
                 Ok(res) => {
                     all_success = false;
-                    warn!("Server {} returned status {} for flush_cache", i, res.status());
-                },
+                    warn!(
+                        "Server {} returned status {} for flush_cache",
+                        i,
+                        res.status()
+                    );
+                }
                 Err(e) => {
                     all_success = false;
                     error!("Server {} error during flush_cache: {}", i, e);
@@ -853,8 +937,7 @@ impl PDRouter {
         if all_success {
             HttpResponse::Ok().body("Cache flushed on all servers")
         } else {
-            HttpResponse::InternalServerError()
-                .body("Cache flush failed on one or more servers")
+            HttpResponse::InternalServerError().body("Cache flush failed on one or more servers")
         }
     }
 }

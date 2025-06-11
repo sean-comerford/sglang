@@ -43,7 +43,8 @@ impl EngineInfo {
 
     pub fn get_hostname(&self) -> String {
         // Simple hostname extraction without external dependencies
-        let url = self.url
+        let url = self
+            .url
             .trim_start_matches("http://")
             .trim_start_matches("https://");
         url.split(':').next().unwrap_or("localhost").to_string()

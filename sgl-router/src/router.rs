@@ -29,8 +29,6 @@ pub fn copy_request_headers(req: &HttpRequest) -> Vec<(String, String)> {
         .collect()
 }
 
-
-
 #[derive(Debug)]
 pub enum Router {
     RoundRobin {
@@ -396,7 +394,8 @@ impl Router {
         if route != "/health" {
             for (name, value) in copy_request_headers(req) {
                 // Skip Content-Type and Content-Length as .json() sets them
-                if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length"
+                {
                     request_builder = request_builder.header(name, value);
                 }
             }
@@ -506,9 +505,7 @@ impl Router {
                 return HttpResponse::NotImplemented()
                     .body("route_to_all not implemented for PrefillDecode mode");
             }
-            _ => {
-                self.get_worker_urls().read().unwrap().clone()
-            }
+            _ => self.get_worker_urls().read().unwrap().clone(),
         };
 
         // Send requests to all workers concurrently
@@ -529,7 +526,9 @@ impl Router {
 
         // Check if all succeeded
         let all_success = results.iter().all(|r| {
-            r.as_ref().map(|res| res.status().is_success()).unwrap_or(false)
+            r.as_ref()
+                .map(|res| res.status().is_success())
+                .unwrap_or(false)
         });
 
         if all_success {
@@ -833,10 +832,10 @@ impl Router {
         if self.is_prefill_decode() {
             // This should not be called for PD mode anymore
             // PD requests go through route_pd_generate_typed or route_pd_chat_typed
-            HttpResponse::InternalServerError()
-                .body("PD routing should use typed handlers")
+            HttpResponse::InternalServerError().body("PD routing should use typed handlers")
         } else {
-            self.route_single_worker_request(client, req, body, route).await
+            self.route_single_worker_request(client, req, body, route)
+                .await
         }
     }
 
@@ -928,7 +927,7 @@ impl Router {
             Router::PrefillDecode { .. } => {
                 // For PD mode, we don't support adding workers via this method
                 return Err("Adding workers to PrefillDecode router not supported via add_worker. Use dedicated PD management methods.".to_string());
-            },
+            }
         };
 
         let start_time = std::time::Instant::now();
@@ -1073,27 +1072,28 @@ impl Router {
 
     async fn get_worker_load(&self, client: &reqwest::Client, worker_url: &str) -> Option<isize> {
         match client.get(&format!("{}/get_load", worker_url)).send().await {
-            Ok(res) if res.status().is_success() => {
-                match res.bytes().await {
-                    Ok(bytes) => {
-                        match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                            Ok(data) => data.get("load")
-                                .and_then(|v| v.as_i64())
-                                .map(|v| v as isize),
-                            Err(e) => {
-                                debug!("Failed to parse load response from {}: {}", worker_url, e);
-                                None
-                            }
-                        }
-                    }
+            Ok(res) if res.status().is_success() => match res.bytes().await {
+                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(data) => data
+                        .get("load")
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as isize),
                     Err(e) => {
-                        debug!("Failed to read load response from {}: {}", worker_url, e);
+                        debug!("Failed to parse load response from {}: {}", worker_url, e);
                         None
                     }
+                },
+                Err(e) => {
+                    debug!("Failed to read load response from {}: {}", worker_url, e);
+                    None
                 }
-            }
+            },
             Ok(res) => {
-                debug!("Worker {} returned non-success status: {}", worker_url, res.status());
+                debug!(
+                    "Worker {} returned non-success status: {}",
+                    worker_url,
+                    res.status()
+                );
                 None
             }
             Err(e) => {
@@ -1110,9 +1110,7 @@ impl Router {
         _req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => {
-                pd_router.health_generate(client).await
-            }
+            Router::PrefillDecode { pd_router } => pd_router.health_generate(client).await,
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
@@ -1126,7 +1124,9 @@ impl Router {
     ) -> HttpResponse {
         match self {
             Router::PrefillDecode { pd_router } => {
-                pd_router.route_generate(client, req, typed_req, route).await
+                pd_router
+                    .route_generate(client, req, typed_req, route)
+                    .await
             }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
@@ -1153,34 +1153,21 @@ impl Router {
         _req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => {
-                pd_router.get_server_info(client).await
-            }
+            Router::PrefillDecode { pd_router } => pd_router.get_server_info(client).await,
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
 
-    pub async fn get_pd_models(
-        &self,
-        client: &reqwest::Client,
-        req: &HttpRequest,
-    ) -> HttpResponse {
+    pub async fn get_pd_models(&self, client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => {
-                pd_router.get_models(client, req).await
-            }
+            Router::PrefillDecode { pd_router } => pd_router.get_models(client, req).await,
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
 
-    pub async fn route_pd_flush_cache(
-        &self,
-        client: &reqwest::Client,
-    ) -> HttpResponse {
+    pub async fn route_pd_flush_cache(&self, client: &reqwest::Client) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => {
-                pd_router.flush_cache(client).await
-            }
+            Router::PrefillDecode { pd_router } => pd_router.flush_cache(client).await,
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
@@ -1191,9 +1178,7 @@ impl Router {
         req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => {
-                pd_router.get_model_info(client, req).await
-            }
+            Router::PrefillDecode { pd_router } => pd_router.get_model_info(client, req).await,
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }

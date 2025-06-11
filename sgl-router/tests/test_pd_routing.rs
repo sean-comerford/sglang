@@ -7,12 +7,10 @@
 
 #[cfg(test)]
 mod test_pd_routing {
-    use sglang_router_rs::pd_types::{
-        EngineInfo, EngineType, PDSelectionPolicy
-    };
-    use sglang_router_rs::router::{PolicyConfig, Router};
-    use serde_json::json;
     use rand::Rng;
+    use serde_json::json;
+    use sglang_router_rs::pd_types::{EngineInfo, EngineType, PDSelectionPolicy};
+    use sglang_router_rs::router::{PolicyConfig, Router};
 
     // Test-only struct to help validate PD request parsing
     #[derive(Debug)]
@@ -24,7 +22,8 @@ mod test_pd_routing {
     impl PDRequest {
         // Extract PD-relevant info from JSON for testing
         pub fn from_json(json: &serde_json::Value) -> Self {
-            let is_stream = json.get("stream")
+            let is_stream = json
+                .get("stream")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
@@ -37,7 +36,10 @@ mod test_pd_routing {
                 None
             };
 
-            PDRequest { is_stream, batch_size }
+            PDRequest {
+                is_stream,
+                batch_size,
+            }
         }
     }
 
@@ -68,9 +70,18 @@ mod test_pd_routing {
         assert_eq!(decode_engine.get_hostname(), "decode");
 
         // Test API path generation
-        assert_eq!(prefill_engine.api_path("/generate"), "http://prefill:8080/generate");
-        assert_eq!(prefill_engine.api_path("health"), "http://prefill:8080/health");
-        assert_eq!(decode_engine.api_path("/v1/chat/completions"), "http://decode:8080/v1/chat/completions");
+        assert_eq!(
+            prefill_engine.api_path("/generate"),
+            "http://prefill:8080/generate"
+        );
+        assert_eq!(
+            prefill_engine.api_path("health"),
+            "http://prefill:8080/health"
+        );
+        assert_eq!(
+            decode_engine.api_path("/v1/chat/completions"),
+            "http://decode:8080/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -95,7 +106,9 @@ mod test_pd_routing {
                 PDSelectionPolicy::PowerOfTwo => {
                     assert!(matches!(policy, PDSelectionPolicy::PowerOfTwo));
                 }
-                PDSelectionPolicy::CacheAware { cache_threshold, .. } => {
+                PDSelectionPolicy::CacheAware {
+                    cache_threshold, ..
+                } => {
                     assert!(*cache_threshold >= 0.0 && *cache_threshold <= 1.0);
                 }
             }
@@ -137,10 +150,7 @@ mod test_pd_routing {
                     ("http://p2:8080".to_string(), Some(9001)),
                     ("http://p3:8080".to_string(), Some(9002)),
                 ],
-                decode_urls: vec![
-                    "http://d1:8080".to_string(),
-                    "http://d2:8080".to_string(),
-                ],
+                decode_urls: vec!["http://d1:8080".to_string(), "http://d2:8080".to_string()],
                 timeout_secs: 10,
                 interval_secs: 2,
             },
@@ -250,7 +260,10 @@ mod test_pd_routing {
 
         // Verify batch bootstrap fields
         assert!(batch_json["bootstrap_host"].is_array());
-        assert_eq!(batch_json["bootstrap_host"].as_array().unwrap().len(), batch_size);
+        assert_eq!(
+            batch_json["bootstrap_host"].as_array().unwrap().len(),
+            batch_size
+        );
         assert!(batch_json["bootstrap_port"].is_array());
         assert!(batch_json["bootstrap_room"].is_array());
         assert_eq!(batch_json["stream"], true); // Original field preserved
@@ -295,7 +308,7 @@ mod test_pd_routing {
             ("http://10.0.0.1:8080", "10.0.0.1"),
             ("https://api.example.com:443", "api.example.com"),
             ("http://prefill-server", "prefill-server"),
-            ("http://[::1]:8080", "["), // IPv6 edge case
+            ("http://[::1]:8080", "["),  // IPv6 edge case
             ("prefill:8080", "prefill"), // No protocol
         ];
 
@@ -373,9 +386,9 @@ mod test_pd_routing {
         // Scenario 1: Clear winner for both prefill and decode
         let _loads = vec![
             ("prefill1", 100),
-            ("prefill2", 10),  // Should be selected
+            ("prefill2", 10), // Should be selected
             ("decode1", 50),
-            ("decode2", 5),    // Should be selected
+            ("decode2", 5), // Should be selected
         ];
 
         // In actual implementation, the lower load should be selected
@@ -385,9 +398,9 @@ mod test_pd_routing {
         // Scenario 2: Equal loads (should select first)
         let _equal_loads = vec![
             ("prefill1", 20),
-            ("prefill2", 20),  // Either could be selected
+            ("prefill2", 20), // Either could be selected
             ("decode1", 30),
-            ("decode2", 30),   // Either could be selected
+            ("decode2", 30), // Either could be selected
         ];
 
         // When loads are equal, <= comparison means first is selected
@@ -407,11 +420,14 @@ mod test_pd_routing {
         let policies = vec![
             (PDSelectionPolicy::Random, false),
             (PDSelectionPolicy::PowerOfTwo, true),
-            (PDSelectionPolicy::CacheAware {
-                cache_threshold: 0.5,
-                balance_abs_threshold: 32,
-                balance_rel_threshold: 1.1,
-            }, false),
+            (
+                PDSelectionPolicy::CacheAware {
+                    cache_threshold: 0.5,
+                    balance_abs_threshold: 32,
+                    balance_rel_threshold: 1.1,
+                },
+                false,
+            ),
         ];
 
         for (policy, should_monitor) in policies {
@@ -424,8 +440,8 @@ mod test_pd_routing {
 
     #[tokio::test]
     async fn test_watch_channel_behavior() {
-        use tokio::sync::watch;
         use std::collections::HashMap;
+        use tokio::sync::watch;
 
         // Test watch channel's broadcast behavior
         let (tx, rx1) = watch::channel(HashMap::new());
@@ -649,12 +665,31 @@ mod test_pd_routing {
 
         benchmark_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
         benchmark_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
-        benchmark_request["bootstrap_room"] = json!((0..batch_size).map(|_| 12345u64).collect::<Vec<_>>());
+        benchmark_request["bootstrap_room"] =
+            json!((0..batch_size).map(|_| 12345u64).collect::<Vec<_>>());
 
         // Verify bootstrap fields match batch size
-        assert_eq!(benchmark_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
-        assert_eq!(benchmark_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
-        assert_eq!(benchmark_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
+        assert_eq!(
+            benchmark_request["bootstrap_host"]
+                .as_array()
+                .unwrap()
+                .len(),
+            batch_size
+        );
+        assert_eq!(
+            benchmark_request["bootstrap_port"]
+                .as_array()
+                .unwrap()
+                .len(),
+            batch_size
+        );
+        assert_eq!(
+            benchmark_request["bootstrap_room"]
+                .as_array()
+                .unwrap()
+                .len(),
+            batch_size
+        );
 
         // Verify original fields are preserved
         assert_eq!(benchmark_request["return_logprob"], true);
@@ -708,7 +743,10 @@ mod test_pd_routing {
             ("/register", "POST", false), // NOT IMPLEMENTED - needs dynamic worker management
         ];
 
-        let implemented_count = implemented_endpoints.iter().filter(|(_, _, impl_status)| *impl_status).count();
+        let implemented_count = implemented_endpoints
+            .iter()
+            .filter(|(_, _, impl_status)| *impl_status)
+            .count();
         let total_count = implemented_endpoints.len();
 
         // We've implemented 10 out of 11 endpoints (register is not needed for Phase 1/2)
@@ -745,22 +783,52 @@ mod test_pd_routing {
             });
 
             // Simulate bootstrap injection
-            let prefill_info = EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
+            let prefill_info =
+                EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
 
-            large_batch_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
-            large_batch_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
-            large_batch_request["bootstrap_room"] = json!((0..batch_size).map(|_| rand::thread_rng().gen::<u64>()).collect::<Vec<_>>());
+            large_batch_request["bootstrap_host"] =
+                json!(vec![prefill_info.get_hostname(); batch_size]);
+            large_batch_request["bootstrap_port"] =
+                json!(vec![prefill_info.bootstrap_port; batch_size]);
+            large_batch_request["bootstrap_room"] = json!((0..batch_size)
+                .map(|_| rand::thread_rng().gen::<u64>())
+                .collect::<Vec<_>>());
 
             let elapsed = start.elapsed();
 
             // Verify bootstrap fields are correctly sized
-            assert_eq!(large_batch_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
-            assert_eq!(large_batch_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
-            assert_eq!(large_batch_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
+            assert_eq!(
+                large_batch_request["bootstrap_host"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                batch_size
+            );
+            assert_eq!(
+                large_batch_request["bootstrap_port"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                batch_size
+            );
+            assert_eq!(
+                large_batch_request["bootstrap_room"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                batch_size
+            );
 
             // Bootstrap injection should be reasonably fast even for large batches
-            println!("Bootstrap injection for batch_size {} took {:?}", batch_size, elapsed);
-            assert!(elapsed.as_millis() < 1000, "Bootstrap injection took too long for batch size {}", batch_size);
+            println!(
+                "Bootstrap injection for batch_size {} took {:?}",
+                batch_size, elapsed
+            );
+            assert!(
+                elapsed.as_millis() < 1000,
+                "Bootstrap injection took too long for batch size {}",
+                batch_size
+            );
         }
     }
 
@@ -768,10 +836,10 @@ mod test_pd_routing {
     fn test_payload_size_calculation() {
         // Test payload size estimation for bench_one_batch_server.py scenarios
         let test_cases = vec![
-            (1, 1024, 16),      // Small batch
-            (16, 1024, 16),     // Medium batch
-            (64, 1024, 16),     // Large batch
-            (8192, 4096, 5),    // Benchmark scenario
+            (1, 1024, 16),   // Small batch
+            (16, 1024, 16),  // Medium batch
+            (64, 1024, 16),  // Large batch
+            (8192, 4096, 5), // Benchmark scenario
         ];
 
         for (batch_size, input_len, _output_len) in test_cases {
@@ -781,13 +849,23 @@ mod test_pd_routing {
             let json_overhead = batch_size * 100; // ~100 bytes overhead per request
             let total_size = tokens_size + json_overhead;
 
-            println!("Batch size: {}, Input len: {}, Estimated payload: {} MB",
-                     batch_size, input_len, total_size / (1024 * 1024));
+            println!(
+                "Batch size: {}, Input len: {}, Estimated payload: {} MB",
+                batch_size,
+                input_len,
+                total_size / (1024 * 1024)
+            );
 
             // For the benchmark case (8192, 4096), this should be ~134 MB
             if batch_size == 8192 && input_len == 4096 {
-                assert!(total_size > 100 * 1024 * 1024, "Benchmark payload should be > 100MB");
-                assert!(total_size < 200 * 1024 * 1024, "Benchmark payload should be < 200MB");
+                assert!(
+                    total_size > 100 * 1024 * 1024,
+                    "Benchmark payload should be > 100MB"
+                );
+                assert!(
+                    total_size < 200 * 1024 * 1024,
+                    "Benchmark payload should be < 200MB"
+                );
             }
         }
     }
