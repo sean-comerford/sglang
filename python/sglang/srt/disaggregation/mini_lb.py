@@ -213,7 +213,7 @@ async def get_server_info():
     prefill_infos = []
     decode_infos = []
     all_internal_states = []
-    
+
     async with aiohttp.ClientSession() as session:
         for server in chain(prefill_servers):
             server_info = await session.get(f"{server}/get_server_info")
@@ -231,17 +231,19 @@ async def get_server_info():
         return {
             "internal_states": all_internal_states,
             "prefill": prefill_infos,
-            "decode": decode_infos
+            "decode": decode_infos,
         }
     else:
         # Fallback with dummy data if no internal states found
         return {
-            "internal_states": [{
-                "last_gen_throughput": 0.0,
-                "avg_spec_accept_length": None,
-            }],
+            "internal_states": [
+                {
+                    "last_gen_throughput": 0.0,
+                    "avg_spec_accept_length": None,
+                }
+            ],
             "prefill": prefill_infos,
-            "decode": decode_infos
+            "decode": decode_infos,
         }
 
 

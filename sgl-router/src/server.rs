@@ -150,7 +150,7 @@ async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> i
                         }
                     }
                 }
-                
+
                 data.router
                     .route_pd_generate_typed(&data.client, &req, typed_req, "/generate")
                     .await

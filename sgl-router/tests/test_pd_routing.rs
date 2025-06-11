@@ -461,7 +461,7 @@ mod test_pd_routing {
     #[test]
     fn test_generate_request_formats() {
         // Based on bench_one_batch_server.py request patterns
-        
+
         // Test 1: Batch request with input_ids (most common in benchmarks)
         let batch_request = json!({
             "input_ids": [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
@@ -503,7 +503,7 @@ mod test_pd_routing {
                 },
                 "stream": true
             });
-            
+
             let pd_req = PDRequest::from_json(&request);
             assert_eq!(pd_req.batch_size, Some(bs));
         }
@@ -646,7 +646,7 @@ mod test_pd_routing {
         // Simulate bootstrap injection
         let prefill_info = EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
         let batch_size = 16;
-        
+
         benchmark_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
         benchmark_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
         benchmark_request["bootstrap_room"] = json!((0..batch_size).map(|_| 12345u64).collect::<Vec<_>>());
@@ -655,7 +655,7 @@ mod test_pd_routing {
         assert_eq!(benchmark_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
         assert_eq!(benchmark_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
         assert_eq!(benchmark_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
-        
+
         // Verify original fields are preserved
         assert_eq!(benchmark_request["return_logprob"], true);
         assert_eq!(benchmark_request["stream"], true);
@@ -707,21 +707,21 @@ mod test_pd_routing {
             ("/get_loads", "GET", true),
             ("/register", "POST", false), // NOT IMPLEMENTED - needs dynamic worker management
         ];
-        
+
         let implemented_count = implemented_endpoints.iter().filter(|(_, _, impl_status)| *impl_status).count();
         let total_count = implemented_endpoints.len();
-        
+
         // We've implemented 10 out of 11 endpoints (register is not needed for Phase 1/2)
         assert_eq!(implemented_count, 10);
         assert_eq!(total_count, 11);
-        
+
         // Document the missing endpoint
         let missing: Vec<_> = implemented_endpoints
             .iter()
             .filter(|(_, _, impl_status)| !impl_status)
             .map(|(endpoint, method, _)| format!("{} {}", method, endpoint))
             .collect();
-        
+
         assert_eq!(missing, vec!["POST /register"]);
     }
 
@@ -730,10 +730,10 @@ mod test_pd_routing {
         // Test bootstrap injection performance with very large batches
         // This simulates the bench_one_batch_server.py scenario
         let large_batch_sizes = vec![1024, 4096, 8192];
-        
+
         for batch_size in large_batch_sizes {
             let start = std::time::Instant::now();
-            
+
             // Simulate a large batch request
             let mut large_batch_request = json!({
                 "input_ids": vec![vec![1, 2, 3, 4]; batch_size],
@@ -743,21 +743,21 @@ mod test_pd_routing {
                 },
                 "stream": true
             });
-            
+
             // Simulate bootstrap injection
             let prefill_info = EngineInfo::new_prefill("http://prefill:8080".to_string(), Some(9000));
-            
+
             large_batch_request["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
             large_batch_request["bootstrap_port"] = json!(vec![prefill_info.bootstrap_port; batch_size]);
             large_batch_request["bootstrap_room"] = json!((0..batch_size).map(|_| rand::thread_rng().gen::<u64>()).collect::<Vec<_>>());
-            
+
             let elapsed = start.elapsed();
-            
+
             // Verify bootstrap fields are correctly sized
             assert_eq!(large_batch_request["bootstrap_host"].as_array().unwrap().len(), batch_size);
             assert_eq!(large_batch_request["bootstrap_port"].as_array().unwrap().len(), batch_size);
             assert_eq!(large_batch_request["bootstrap_room"].as_array().unwrap().len(), batch_size);
-            
+
             // Bootstrap injection should be reasonably fast even for large batches
             println!("Bootstrap injection for batch_size {} took {:?}", batch_size, elapsed);
             assert!(elapsed.as_millis() < 1000, "Bootstrap injection took too long for batch size {}", batch_size);
@@ -773,17 +773,17 @@ mod test_pd_routing {
             (64, 1024, 16),     // Large batch
             (8192, 4096, 5),    // Benchmark scenario
         ];
-        
+
         for (batch_size, input_len, _output_len) in test_cases {
             // Estimate payload size (rough calculation)
             // Each token is ~4 bytes (i32), plus JSON overhead
             let tokens_size = batch_size * input_len * 4; // 4 bytes per token
             let json_overhead = batch_size * 100; // ~100 bytes overhead per request
             let total_size = tokens_size + json_overhead;
-            
-            println!("Batch size: {}, Input len: {}, Estimated payload: {} MB", 
+
+            println!("Batch size: {}, Input len: {}, Estimated payload: {} MB",
                      batch_size, input_len, total_size / (1024 * 1024));
-            
+
             // For the benchmark case (8192, 4096), this should be ~134 MB
             if batch_size == 8192 && input_len == 4096 {
                 assert!(total_size > 100 * 1024 * 1024, "Benchmark payload should be > 100MB");

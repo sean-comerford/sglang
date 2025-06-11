@@ -32,7 +32,7 @@ impl PDRouter {
     // - add_decode_server(url: String)
     // - remove_prefill_server(url: &str)
     // - remove_decode_server(url: &str)
-    
+
     pub fn new(
         prefill_urls: Vec<(String, Option<u16>)>,
         decode_urls: Vec<String>,
@@ -118,13 +118,13 @@ impl PDRouter {
         route: &str,
     ) -> HttpResponse {
         let start = Instant::now();
-        
+
         // Get stream flag and return_logprob flag before moving the request
         let is_stream = typed_req.is_stream();
         let return_logprob = typed_req.other.get("return_logprob")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
+
         // Select servers
         let (prefill, decode) = match self.select_pd_pair(client).await {
             Ok(pair) => pair,
@@ -138,7 +138,7 @@ impl PDRouter {
 
         // Log routing decision
         info!("PD routing: {} -> prefill={}, decode={}", route, prefill.url, decode.url);
-        
+
         // Add bootstrap info using the trait method
         if let Err(e) = typed_req.add_bootstrap_info(&prefill) {
             error!("Failed to add bootstrap info: {}", e);
@@ -146,7 +146,7 @@ impl PDRouter {
             return HttpResponse::InternalServerError()
                 .body(format!("Bootstrap injection failed: {}", e));
         }
-        
+
         // Convert to JSON after bootstrap injection
         let json_with_bootstrap = match serde_json::to_value(&typed_req) {
             Ok(json) => json,
@@ -156,7 +156,7 @@ impl PDRouter {
                     .body("Failed to serialize request");
             }
         };
-        
+
         // Execute dual dispatch
         self.execute_dual_dispatch(
             client,
@@ -170,7 +170,7 @@ impl PDRouter {
             start,
         ).await
     }
-    
+
     // Route a typed chat request
     pub async fn route_chat(
         &self,
@@ -180,13 +180,13 @@ impl PDRouter {
         route: &str,
     ) -> HttpResponse {
         let start = Instant::now();
-        
+
         // Get stream flag and return_logprob flag before moving the request
         let is_stream = typed_req.is_stream();
         let return_logprob = typed_req.other.get("return_logprob")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
+
         // Select servers
         let (prefill, decode) = match self.select_pd_pair(client).await {
             Ok(pair) => pair,
@@ -200,7 +200,7 @@ impl PDRouter {
 
         // Log routing decision
         info!("PD routing: {} -> prefill={}, decode={}", route, prefill.url, decode.url);
-        
+
         // Add bootstrap info using the trait method
         if let Err(e) = typed_req.add_bootstrap_info(&prefill) {
             error!("Failed to add bootstrap info: {}", e);
@@ -208,7 +208,7 @@ impl PDRouter {
             return HttpResponse::InternalServerError()
                 .body(format!("Bootstrap injection failed: {}", e));
         }
-        
+
         // Convert to JSON after bootstrap injection
         let json_with_bootstrap = match serde_json::to_value(&typed_req) {
             Ok(json) => json,
@@ -218,7 +218,7 @@ impl PDRouter {
                     .body("Failed to serialize request");
             }
         };
-        
+
         // Execute dual dispatch
         self.execute_dual_dispatch(
             client,
@@ -316,14 +316,14 @@ impl PDRouter {
                                             .unwrap_or("")
                                             .trim_start_matches("data: ")
                                             .trim();
-                                        
+
                                         match serde_json::from_str::<Value>(chunk_str) {
                                             Ok(prefill_json) => {
                                                 let prefill_logprobs = prefill_json
                                                     .get("meta_info")
                                                     .and_then(|m| m.get("input_token_logprobs"))
                                                     .cloned();
-                                                
+
                                                 // Stream decode response with merged logprobs
                                                 HttpResponse::build(status)
                                                     .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
@@ -647,13 +647,13 @@ impl PDRouter {
         let mut all_healthy = true;
         let mut unhealthy_servers = Vec::new();
         let mut tasks = Vec::new();
-        
+
         for worker in self.prefill_workers.read().unwrap().iter() {
             let url = format!("{}/health_generate", worker.url);
             // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
             tasks.push(client.get(&url).send());
         }
-        
+
         for worker in self.decode_workers.read().unwrap().iter() {
             let url = format!("{}/health_generate", worker.url);
             // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
@@ -661,7 +661,7 @@ impl PDRouter {
         }
 
         let results = futures_util::future::join_all(tasks).await;
-        
+
         for (i, result) in results.into_iter().enumerate() {
             match result {
                 Ok(res) if res.status().is_success() => {},
@@ -688,7 +688,7 @@ impl PDRouter {
         // Get info from all decode servers (where generation happens)
         let mut all_internal_states = Vec::new();
         let mut decode_infos = Vec::new();
-        
+
         for worker in self.decode_workers.read().unwrap().iter() {
             match client.get(&format!("{}/get_server_info", worker.url)).send().await {
                 Ok(res) if res.status().is_success() => {
@@ -708,7 +708,7 @@ impl PDRouter {
                 _ => {}
             }
         }
-        
+
         // If we have internal states, return in the format expected by bench_one_batch_server.py
         if !all_internal_states.is_empty() {
             // Use the first decode server's internal state (they should all be similar)
@@ -820,13 +820,13 @@ impl PDRouter {
 
     pub async fn flush_cache(&self, client: &reqwest::Client) -> HttpResponse {
         let mut tasks = Vec::new();
-        
+
         // Flush cache on all prefill servers
         for worker in self.prefill_workers.read().unwrap().iter() {
             let url = format!("{}/flush_cache", worker.url);
             tasks.push(client.post(&url).send());
         }
-        
+
         // Flush cache on all decode servers
         for worker in self.decode_workers.read().unwrap().iter() {
             let url = format!("{}/flush_cache", worker.url);
@@ -834,7 +834,7 @@ impl PDRouter {
         }
 
         let results = futures_util::future::join_all(tasks).await;
-        
+
         let mut all_success = true;
         for (i, result) in results.into_iter().enumerate() {
             match result {

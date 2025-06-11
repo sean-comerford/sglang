@@ -553,7 +553,7 @@ impl Router {
                 // For non-PD routers, handle normally
             }
         }
-        
+
         let urls = self.get_worker_urls().read().unwrap().clone();
         let prefill_urls: Vec<String> = Vec::new();
         let decode_urls = urls;
