@@ -34,45 +34,54 @@ fn inject_bootstrap_fields(json: &mut Value, prefill: &EngineInfo) {
     let hostname = prefill.get_hostname();
     let bootstrap_port = prefill.bootstrap_port;
 
-    // Detect if this is a batch request by checking text or input_ids arrays
+    // Detect if this is a batch request
+    // For text: check if it's an array of strings
+    // For input_ids: check if it's an array of arrays
     let text_array = json.get("text").and_then(|v| v.as_array());
     let input_ids_array = json.get("input_ids").and_then(|v| v.as_array());
 
-    let is_batch = text_array.is_some() || input_ids_array.is_some();
+    let batch_size = if let Some(text_arr) = text_array {
+        // text is an array, so it's a batch
+        Some(text_arr.len())
+    } else if let Some(ids_arr) = input_ids_array {
+        // Check if input_ids is an array of arrays (batch) or array of ints (single)
+        if !ids_arr.is_empty() && ids_arr[0].is_array() {
+            // It's an array of arrays, so batch request
+            Some(ids_arr.len())
+        } else {
+            // It's an array of ints, so single request
+            None
+        }
+    } else {
+        // No text or input_ids array found, treat as single request
+        None
+    };
 
-    if is_batch {
-        // For batch requests, get the batch size
-        let batch_size = text_array
-            .map(|arr| arr.len())
-            .or_else(|| input_ids_array.map(|arr| arr.len()));
+    if let Some(size) = batch_size {
+        if size > 0 {
+            // Inject batch bootstrap fields
+            json["bootstrap_host"] = serde_json::json!(vec![hostname; size]);
 
-        match batch_size {
-            Some(size) if size > 0 => {
-                // Inject batch bootstrap fields
-                json["bootstrap_host"] = serde_json::json!(vec![hostname; size]);
-
-                // Handle bootstrap_port - create array of the same value or null
-                match bootstrap_port {
-                    Some(port) => {
-                        json["bootstrap_port"] = serde_json::json!(vec![port; size]);
-                    }
-                    None => {
-                        json["bootstrap_port"] = serde_json::json!(vec![serde_json::Value::Null; size]);
-                    }
+            // Handle bootstrap_port - create array of the same value or null
+            match bootstrap_port {
+                Some(port) => {
+                    json["bootstrap_port"] = serde_json::json!(vec![port; size]);
                 }
+                None => {
+                    json["bootstrap_port"] = serde_json::json!(vec![serde_json::Value::Null; size]);
+                }
+            }
 
-                json["bootstrap_room"] = serde_json::json!(
-                    (0..size).map(|_| rand::random::<u64>()).collect::<Vec<_>>()
-                );
-                debug!("Injected bootstrap info for batch request with size {}", size);
-            }
-            _ => {
-                warn!("Batch request detected but unable to determine batch size, treating as single request");
-                // Fall back to single request
-                json["bootstrap_host"] = serde_json::json!(hostname);
-                json["bootstrap_port"] = serde_json::json!(bootstrap_port);
-                json["bootstrap_room"] = serde_json::json!(rand::random::<u64>());
-            }
+            json["bootstrap_room"] = serde_json::json!(
+                (0..size).map(|_| rand::random::<u64>()).collect::<Vec<_>>()
+            );
+            debug!("Injected bootstrap info for batch request with size {}", size);
+        } else {
+            // Empty batch, treat as single request
+            json["bootstrap_host"] = serde_json::json!(hostname);
+            json["bootstrap_port"] = serde_json::json!(bootstrap_port);
+            json["bootstrap_room"] = serde_json::json!(rand::random::<u64>());
+            debug!("Injected bootstrap info for single request (empty batch)");
         }
     } else {
         // Single request
