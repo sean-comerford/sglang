@@ -50,7 +50,17 @@ fn inject_bootstrap_fields(json: &mut Value, prefill: &EngineInfo) {
             Some(size) if size > 0 => {
                 // Inject batch bootstrap fields
                 json["bootstrap_host"] = serde_json::json!(vec![hostname; size]);
-                json["bootstrap_port"] = serde_json::json!(vec![bootstrap_port; size]);
+
+                // Handle bootstrap_port - create array of the same value or null
+                match bootstrap_port {
+                    Some(port) => {
+                        json["bootstrap_port"] = serde_json::json!(vec![port; size]);
+                    }
+                    None => {
+                        json["bootstrap_port"] = serde_json::json!(vec![serde_json::Value::Null; size]);
+                    }
+                }
+
                 json["bootstrap_room"] = serde_json::json!(
                     (0..size).map(|_| rand::random::<u64>()).collect::<Vec<_>>()
                 );
@@ -507,7 +517,10 @@ impl Router {
         // Copy all headers from original request except for /health because it does not need authorization
         if route != "/health" {
             for (name, value) in copy_request_headers(req) {
-                request_builder = request_builder.header(name, value);
+                // Skip Content-Type and Content-Length as .json() sets them
+                if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                    request_builder = request_builder.header(name, value);
+                }
             }
         }
 
@@ -870,7 +883,10 @@ impl Router {
 
         // Copy all headers from original request
         for (name, value) in copy_request_headers(req) {
-            request_builder = request_builder.header(name, value);
+            // Skip Content-Type and Content-Length as .json() sets them
+            if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                request_builder = request_builder.header(&name, &value);
+            }
         }
 
         let res = match request_builder.send().await {
@@ -1209,6 +1225,9 @@ impl Router {
         // Inject bootstrap info
         inject_bootstrap_fields(&mut json_request, &prefill);
 
+        // Debug: Log the JSON being sent
+        debug!("Sending JSON to prefill server: {}", serde_json::to_string_pretty(&json_request).unwrap_or_else(|_| "Failed to serialize".to_string()));
+
         // Determine if streaming
         let is_stream = json_request.get("stream")
             .and_then(|v| v.as_bool())
@@ -1255,30 +1274,23 @@ impl Router {
             }
         }
 
-        // Serialize request once
-        let request_bytes = match serde_json::to_vec(json_request) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                error!("Failed to serialize JSON: {}", e);
-                return HttpResponse::InternalServerError()
-                    .body("Internal error: failed to prepare request");
+        // Build requests using .json() method
+        let mut prefill_request = client
+            .post(&prefill.api_path(route))
+            .json(json_request);
+
+        let mut decode_request = client
+            .post(&decode.api_path(route))
+            .json(json_request);
+
+        // Copy headers from original request
+        for (name, value) in copy_request_headers(req) {
+            // Skip Content-Type and Content-Length as .json() sets them
+            if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length" {
+                prefill_request = prefill_request.header(&name, &value);
+                decode_request = decode_request.header(&name, &value);
             }
-        };
-
-        // Build requests
-        let prefill_request = self.build_pd_request(
-            client,
-            &prefill.api_path(route),
-            &request_bytes,
-            req,
-        );
-
-        let decode_request = self.build_pd_request(
-            client,
-            &decode.api_path(route),
-            &request_bytes,
-            req,
-        );
+        }
 
         // Send both requests concurrently
         let (prefill_result, decode_result) = tokio::join!(
@@ -1313,28 +1325,6 @@ impl Router {
 
         // Process decode response
         self.process_decode_response(decode_result, route, is_stream).await
-    }
-
-    // Build a request with headers copied from original
-    fn build_pd_request(
-        &self,
-        client: &reqwest::Client,
-        url: &str,
-        body: &[u8],
-        original_req: &HttpRequest,
-    ) -> reqwest::RequestBuilder {
-        let mut request = client.post(url)
-            .body(body.to_vec())
-            .header("Content-Type", "application/json"); // Ensure JSON content type
-
-        // Copy headers from original request except Content-Type (we set it above)
-        for (name, value) in copy_request_headers(original_req) {
-            if name.to_lowercase() != "content-type" {
-                request = request.header(name, value);
-            }
-        }
-
-        request
     }
 
     // Record PD-specific metrics
