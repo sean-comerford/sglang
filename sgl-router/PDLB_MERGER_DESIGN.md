@@ -50,7 +50,7 @@ The core idea is to integrate PDLB as a new routing policy within the existing r
 
 This approach:
 - Preserves the router's architecture but requires significant extensions
-- Reuses existing infrastructure (health checking, metrics, service discovery) 
+- Reuses existing infrastructure (health checking, metrics, service discovery)
 - Maintains backward compatibility with careful API design
 - Enables feature sharing between routing modes with architectural bridging
 
@@ -60,10 +60,10 @@ This approach:
 
 **Current PDLB:**
 ```python
-# sgl-pdlb module: "_rust" 
+# sgl-pdlb module: "_rust"
 LoadBalancer(
     host="localhost", port=8080, policy="po2",
-    prefill_infos=[("http://p1:8080", 9000)], 
+    prefill_infos=[("http://p1:8080", 9000)],
     decode_infos=["http://d1:8080"],
     log_interval=5, timeout=600
 )
@@ -87,14 +87,14 @@ Router(
 **PDLB Flow:**
 ```rust
 // Typed request parsing
-web::Json<GenerateReqInput> -> Box<dyn Bootstrap> 
+web::Json<GenerateReqInput> -> Box<dyn Bootstrap>
 -> add_bootstrap_info() -> serde_json::Value
 -> route to BOTH prefill AND decode
 ```
 
 **Router Flow:**
 ```rust
-// Raw byte processing  
+// Raw byte processing
 Bytes -> get_text_from_request() -> select_generate_worker()
 -> route to SINGLE worker
 ```
@@ -142,40 +142,40 @@ graph TB
         A[Router Core] --> B{Router Type}
         B --> C[Regular Router]
         B --> D[PD Router Module]
-        
+
         C --> C1[RoundRobin]
-        C --> C2[Random] 
+        C --> C2[Random]
         C --> C3[CacheAware]
-        
+
         D --> D1[PD Random]
         D --> D2[PD PowerOfTwo]
         D --> D3[PD CacheAware*]
-        
+
         D --> E[PD Features]
         E --> E1[Bootstrap Injection]
         E --> E2[Dual Dispatch]
         E --> E3[Logprob Merging]
         E --> E4[Load Monitoring]
     end
-    
+
     subgraph "Worker Types"
         F[Regular Workers]
         G[Prefill Workers]
         H[Decode Workers]
     end
-    
+
     subgraph "Request Flow"
         I[Typed Requests]
         I --> I1[GenerateReqInput]
         I --> I2[ChatReqInput]
         I --> I3[Bootstrap Trait]
     end
-    
+
     C --> F
     D --> G
     D --> H
     I --> D
-    
+
     style D fill:#2E8B57,color:#fff
     style E fill:#DAA520,color:#fff
     style I fill:#1E90FF,color:#fff
@@ -219,43 +219,43 @@ graph TB
         A[Router Core] --> B{Policy Detection}
         B --> C[Regular Router]
         B --> D[PD Router]
-        
+
         C --> C1[RoundRobin]
-        C --> C2[Random] 
+        C --> C2[Random]
         C --> C3[CacheAware]
-        
+
         D --> D1[PD Random]
         D --> D2[PD PowerOfTwo]
         D --> D3[PD CacheAware]
-        
+
         D3 --> E[Tree-Based Selection]
         E --> E1[Prefill Tree]
         E --> E2[Load Tracking]
         E --> E3[Balance Detection]
     end
-    
+
     subgraph "Worker Infrastructure"
         F[Regular Workers]
         G[Prefill Workers]
         H[Decode Workers]
     end
-    
+
     subgraph "Shared Services"
         I[Health Checking]
         J[Service Discovery]
         K[Prometheus Metrics]
         L[Logging]
     end
-    
+
     C --> F
     D --> G
     D --> H
-    
+
     A --> I
     A --> J
     A --> K
     A --> L
-    
+
     style D3 fill:#2E8B57,color:#fff
     style E fill:#DAA520,color:#fff
     style A fill:#1E90FF,color:#fff
@@ -271,13 +271,13 @@ graph TD
     B --> B1[Regular]
     B --> B2[Prefill]
     B --> B3[Decode]
-    
+
     A --> C[WorkerInfo Struct]
     C --> C1[url: String]
     C --> C2[worker_type: WorkerType]
     C --> C3[bootstrap_port: Option&lt;u16&gt;]
     C --> C4[health_status: HealthStatus]
-    
+
     A --> D[Worker Management]
     D --> D1[Typed Worker Lists]
     D --> D2[Health Check per Type]
@@ -299,7 +299,7 @@ pub enum Router {
 
 **Current PDLB Worker Storage:**
 ```rust
-// strategy_lb.rs - Current implementation  
+// strategy_lb.rs - Current implementation
 pub struct StrategyLB {
     pub prefill_servers: Vec<EngineInfo>,     // Separate typed lists
     pub decode_servers: Vec<EngineInfo>,
@@ -334,7 +334,7 @@ pub enum Router {
 
 **Key Changes:**
 - **DO NOT** replace existing Router worker storage - extend it
-- Add new `PrefillDecode` Router variant alongside existing ones  
+- Add new `PrefillDecode` Router variant alongside existing ones
 - Reuse PDLB's `EngineInfo` structure as-is
 - Support both regular routing and PD routing in same codebase
 
@@ -395,14 +395,14 @@ pub trait BootstrapInjector {
 
 impl BootstrapInjector for serde_json::Value {
     fn inject_bootstrap_info(
-        &mut self, 
+        &mut self,
         prefill_info: &WorkerInfo,
         decode_room: u64,
     ) -> Result<(), String> {
         // Implementation to inject bootstrap_host, bootstrap_port, bootstrap_room
         // Handle both single and batch requests
         let batch_size = self.get_batch_size()?;
-        
+
         if let Some(batch_size) = batch_size {
             // Batch request
             self["bootstrap_host"] = json!(vec![prefill_info.get_hostname(); batch_size]);
@@ -414,7 +414,7 @@ impl BootstrapInjector for serde_json::Value {
             self["bootstrap_port"] = json!(prefill_info.bootstrap_port);
             self["bootstrap_room"] = json!(decode_room);
         }
-        
+
         Ok(())
     }
 }
@@ -432,15 +432,15 @@ impl Router {
         client: &reqwest::Client,
     ) -> (WorkerInfo, WorkerInfo) {
         let mut rng = rand::thread_rng();
-        
+
         // Select two random prefill servers
         let prefill1 = self.select_random_worker(WorkerType::Prefill);
         let prefill2 = self.select_random_worker(WorkerType::Prefill);
-        
-        // Select two random decode servers  
+
+        // Select two random decode servers
         let decode1 = self.select_random_worker(WorkerType::Decode);
         let decode2 = self.select_random_worker(WorkerType::Decode);
-        
+
         // Get loads asynchronously
         let (p1_load, p2_load, d1_load, d2_load) = tokio::join!(
             self.get_worker_load(client, &prefill1),
@@ -448,11 +448,11 @@ impl Router {
             self.get_worker_load(client, &decode1),
             self.get_worker_load(client, &decode2),
         );
-        
+
         // Select workers with lower load
         let selected_prefill = if p1_load <= p2_load { prefill1 } else { prefill2 };
         let selected_decode = if d1_load <= d2_load { decode1 } else { decode2 };
-        
+
         (selected_prefill, selected_decode)
     }
 }
@@ -472,29 +472,29 @@ impl Router {
 graph TD
     A[PD Request] --> B[Extract Text]
     B --> C{Load Balanced?}
-    
+
     C -->|Yes - Imbalanced| D[Use Load Balancing]
     D --> D1[Select Least Loaded Prefill]
     D --> D2[Select PowerOfTwo Decode]
-    
+
     C -->|No - Balanced| E[Use Cache-Aware]
     E --> F[Tree Prefix Match]
     F --> G{Match Rate > Threshold?}
-    
+
     G -->|Yes - Cache Hit| H[Route to Matched Worker]
     G -->|No - Cache Miss| I[Route to Smallest Tree Worker]
-    
+
     H --> J[Update Tree & Load Tracking]
     I --> J
     D1 --> J
     D2 --> K[Send Requests]
     J --> K
-    
+
     K --> L[Prefill Task]
     K --> M[Decode Task]
     L --> N[Bootstrap Response]
     M --> O[Final Response]
-    
+
     style H fill:#2E8B57,color:#fff
     style I fill:#B22222,color:#fff
     style D1 fill:#1E90FF,color:#fff
@@ -508,7 +508,7 @@ pub struct WorkerPool {
     regular_workers: Arc<RwLock<Vec<WorkerInfo>>>,
     prefill_workers: Arc<RwLock<Vec<WorkerInfo>>>,
     decode_workers: Arc<RwLock<Vec<WorkerInfo>>>,
-    
+
     // Cache-aware components for PD mode
     prefill_tree: Option<Arc<Mutex<Tree>>>,
     prefill_load_tracking: Option<Arc<Mutex<HashMap<String, usize>>>>,
@@ -548,10 +548,10 @@ impl Router {
         client: &reqwest::Client,
         text: &str,
     ) -> (WorkerInfo, WorkerInfo) {
-        if let Router::PrefillDecode { 
-            worker_pool, 
-            selection_policy: PDSelectionPolicy::CacheAware { 
-                tree, 
+        if let Router::PrefillDecode {
+            worker_pool,
+            selection_policy: PDSelectionPolicy::CacheAware {
+                tree,
                 cache_threshold,
                 balance_abs_threshold,
                 balance_rel_threshold,
@@ -559,24 +559,24 @@ impl Router {
             load_tracking,
             ..
         } = self {
-            
+
             // 1. Cache-aware PREFILL selection
             let tree = tree.lock().unwrap();
             let load_tracking = load_tracking.lock().unwrap();
-            
+
             // Check load imbalance (same logic as router CacheAware)
             let max_load = *load_tracking.values().max().unwrap_or(&0);
             let min_load = *load_tracking.values().min().unwrap_or(&0);
             let is_imbalanced = max_load.saturating_sub(min_load) > *balance_abs_threshold
                 && (max_load as f32) > (min_load as f32 * balance_rel_threshold);
-            
+
             let selected_prefill = if is_imbalanced {
                 // Use load balancing when imbalanced
                 let least_loaded_url = load_tracking.iter()
                     .min_by_key(|(_, &count)| count)
                     .map(|(url, _)| url.clone())
                     .unwrap();
-                
+
                 worker_pool.prefill_workers.read().unwrap().iter()
                     .find(|w| w.url == least_loaded_url)
                     .cloned()
@@ -585,7 +585,7 @@ impl Router {
                 // Use cache-aware routing when balanced
                 let (matched_text, matched_worker) = tree.prefix_match(text);
                 let match_rate = matched_text.chars().count() as f32 / text.chars().count() as f32;
-                
+
                 if match_rate > *cache_threshold {
                     // High cache hit - use matched worker
                     worker_pool.prefill_workers.read().unwrap().iter()
@@ -601,21 +601,21 @@ impl Router {
                         .unwrap()
                 }
             };
-            
+
             // 2. For DECODE, use PowerOfTwo selection
             let decode = self.select_decode_worker_po2(client).await;
-            
+
             // 3. Update tree and load tracking
             tree.insert(text, &selected_prefill.url);
             *load_tracking.get_mut(&selected_prefill.url).unwrap() += 1;
-            
+
             // 4. Record metrics
             if match_rate > *cache_threshold {
                 counter!("sgl_router_pd_cache_hits_total").increment(1);
             } else {
                 counter!("sgl_router_pd_cache_misses_total").increment(1);
             }
-            
+
             (selected_prefill, decode)
         } else {
             // Fallback to other selection methods
@@ -632,17 +632,17 @@ graph LR
     A[Incoming Request] --> B{Router Policy}
     B -->|Random/RoundRobin/CacheAware| C[Select Single Worker]
     B -->|PrefillDecode| D[Select PD Pair]
-    
+
     D --> E[Select Prefill Server]
     D --> F[Select Decode Server]
-    
+
     E --> G[Add Bootstrap Info]
     G --> H[Send to Prefill]
     F --> I[Send to Decode]
-    
+
     I --> J[Return Decode Response]
     H --> K[Discard Prefill Response]
-    
+
     C --> L[Forward & Return]
 ```
 
@@ -666,7 +666,7 @@ impl Router {
             }
         }
     }
-    
+
 **CRITICAL ISSUE**: This approach oversimplifies the bootstrap injection complexity.
 
 **Current PDLB Bootstrap Flow (from actual code):**
@@ -681,7 +681,7 @@ pub async fn generate(
     let stream = req.is_stream();
     req.add_bootstrap_info(&prefill)?;        // Bootstrap injection via trait method
     let json = serde_json::to_value(req)?;    // Convert to JSON AFTER injection
-    
+
     // Send to BOTH servers concurrently
     let prefill_task = self.route_one(&prefill, Method::POST, api_path, Some(&json), false);
     let decode_task = self.route_one(&decode, Method::POST, api_path, Some(&json), stream);
@@ -728,7 +728,7 @@ impl Router {
             }
         }
     }
-    
+
     async fn route_pd_request(
         &self,
         client: &reqwest::Client,
@@ -750,15 +750,15 @@ impl Router {
             }
             _ => return HttpResponse::BadRequest().body("Unsupported route for PD")
         };
-        
+
         // 2. Extract text for cache-aware routing (if enabled)
         let text = if let PDSelectionPolicy::CacheAware { .. } = self.selection_policy {
             extract_text_from_typed_request(&*typed_request, route)
         } else {
             String::new()
         };
-        
-        // 3. Select prefill and decode servers  
+
+        // 3. Select prefill and decode servers
         let (prefill, decode) = match &self.selection_policy {
             PDSelectionPolicy::CacheAware { .. } if !text.is_empty() => {
                 self.select_pd_pair_cache_aware(client, &text).await
@@ -770,23 +770,23 @@ impl Router {
                 self.select_pd_pair_random()
             }
         };
-        
+
         // 4. **CRITICAL**: Bootstrap injection using PDLB's trait system
         if let Err(e) = typed_request.add_bootstrap_info(&prefill) {
             return HttpResponse::InternalServerError().body(format!("Bootstrap injection failed: {}", e));
         }
-        
+
         // 5. Convert back to JSON after bootstrap injection
         let json_with_bootstrap = match serde_json::to_value(&*typed_request) {
             Ok(json) => json,
             Err(e) => return HttpResponse::InternalServerError().body(format!("JSON serialization failed: {}", e))
         };
-        
+
         // 6. Send to BOTH prefill and decode servers (core PD logic)
         let is_stream = typed_request.is_stream();
         let prefill_task = self.send_pd_request(client, &prefill, route, &json_with_bootstrap, false);
         let decode_task = self.send_pd_request(client, &decode, route, &json_with_bootstrap, is_stream);
-        
+
         // 7. Wait for both, return only decode response (PD paradigm)
         let (_, decode_response) = tokio::join!(prefill_task, decode_task);
         decode_response.unwrap_or_else(|_| HttpResponse::InternalServerError().finish())
@@ -797,7 +797,7 @@ impl Router {
 **Key Implementation Challenges:**
 1. **Type Conversion**: Router's `Bytes` → PDLB's `Box<dyn Bootstrap>` → JSON
 2. **Bootstrap Injection**: Must use PDLB's trait system for batch/single request handling
-3. **Dual Dispatch**: Send to BOTH servers, return only decode response  
+3. **Dual Dispatch**: Send to BOTH servers, return only decode response
 4. **Error Handling**: Handle bootstrap injection failures gracefully
 
 
@@ -811,25 +811,25 @@ graph TD
     B --> B1[Random/RoundRobin Config]
     B --> B2[CacheAware Config]
     B --> B3[PrefillDecode Config]
-    
+
     B3 --> C[PD Sub-configs]
     C --> C1[selection_policy: PDSelectionPolicy]
     C --> C2[prefill_urls: Vec&lt;String&gt;]
     C --> C3[decode_urls: Vec&lt;String&gt;]
     C --> C4[bootstrap_ports: Vec&lt;Option&lt;u16&gt;&gt;]
     C --> C5[Cache Parameters]
-    
+
     C5 --> C5A[cache_threshold]
     C5 --> C5B[balance_abs_threshold]
     C5 --> C5C[balance_rel_threshold]
     C5 --> C5D[eviction_interval_secs]
     C5 --> C5E[max_tree_size]
-    
+
     A --> D[Backward Compatibility]
     D --> D1[Support existing configs]
     D --> D2[Auto-detect worker types]
     D --> D3[Migration helpers]
-    
+
     style B3 fill:#90EE90
     style C5 fill:#FFD700
 ```
@@ -903,7 +903,7 @@ impl Router {
         worker_urls,
         policy = PolicyType::RoundRobin,
         // ... existing params ...
-        
+
         // Add new optional PD params
         prefill_urls = None,
         decode_urls = None,
@@ -912,10 +912,10 @@ impl Router {
         worker_urls: Vec<String>,                           // Required for regular mode
         policy: PolicyType,
         // ... existing params ...
-        prefill_urls: Option<Vec<(String, Option<u16>)>>,  // Optional for PD mode  
+        prefill_urls: Option<Vec<(String, Option<u16>)>>,  // Optional for PD mode
         decode_urls: Option<Vec<String>>,                   // Optional for PD mode
     ) -> PyResult<Self> {
-        
+
         let policy_config = match policy {
             PolicyType::PrefillDecode => {
                 if prefill_urls.is_none() || decode_urls.is_none() {
@@ -945,7 +945,7 @@ impl Router {
     // Keep existing constructor unchanged
     #[new]
     fn new(/* existing params */) -> PyResult<Self> { /* existing code */ }
-    
+
     // Add new PD-specific constructor
     #[classmethod]
     fn new_prefill_decode(
@@ -978,7 +978,7 @@ router = Router(
     decode_urls=["http://d1:8080"]
 )
 
-# New PD usage - Option 2 (Non-Breaking)  
+# New PD usage - Option 2 (Non-Breaking)
 router = Router.new_prefill_decode(
     prefill_urls=[("http://p1:8080", 9000)],
     decode_urls=["http://d1:8080"],
@@ -995,25 +995,25 @@ router = Router.new_prefill_decode(
 // Extend existing metrics for PD mode
 impl Router {
     fn record_pd_metrics(&self, route: &str, prefill_url: &str, decode_url: &str) {
-        counter!("sgl_router_requests_total", 
+        counter!("sgl_router_requests_total",
             "route" => route.to_string(),
             "mode" => "prefill_decode"
         ).increment(1);
-        
-        counter!("sgl_router_pd_prefill_requests_total", 
+
+        counter!("sgl_router_pd_prefill_requests_total",
             "worker" => prefill_url.to_string()
         ).increment(1);
-        
-        counter!("sgl_router_pd_decode_requests_total", 
+
+        counter!("sgl_router_pd_decode_requests_total",
             "worker" => decode_url.to_string()
         ).increment(1);
     }
-    
+
     fn record_pd_load_metrics(&self, prefill_load: usize, decode_load: usize) {
         gauge!("sgl_router_pd_prefill_max_load").set(prefill_load as f64);
         gauge!("sgl_router_pd_decode_max_load").set(decode_load as f64);
     }
-    
+
     // Cache-aware specific metrics
     fn record_pd_cache_metrics(&self, cache_hit: bool, match_rate: f32, selection_policy: &str) {
         if cache_hit {
@@ -1021,13 +1021,13 @@ impl Router {
         } else {
             counter!("sgl_router_pd_cache_misses_total").increment(1);
         }
-        
+
         histogram!("sgl_router_pd_cache_match_rate").record(match_rate as f64);
-        
+
         counter!("sgl_router_pd_selection_events_total",
             "policy" => selection_policy.to_string()
         ).increment(1);
-        
+
         // Tree size metrics for monitoring memory usage
         gauge!("sgl_router_pd_tree_total_nodes").set(self.get_tree_node_count() as f64);
         gauge!("sgl_router_pd_tree_memory_usage_chars").set(self.get_tree_char_count() as f64);
@@ -1042,7 +1042,7 @@ static PD_CACHE_HIT_RATE: LazyLock<Family<Labels, Histogram>> = LazyLock::new(||
 });
 
 static PD_SELECTION_LATENCY: LazyLock<Family<Labels, Histogram>> = LazyLock::new(|| {
-    let opts = HistogramOpts::new("sgl_router_pd_selection_duration_seconds", 
+    let opts = HistogramOpts::new("sgl_router_pd_selection_duration_seconds",
         "Time spent selecting PD worker pair")
         .buckets(prometheus::DEFAULT_BUCKETS.to_vec());
     register_histogram_vec!(opts, &["policy"]).unwrap()
@@ -1192,7 +1192,7 @@ impl Router {
 
 ### **Critical Simplification: No PDLB Users = No Migration Concerns**
 
-Since PDLB has no existing users, we can take the most technically optimal approach without backward compatibility constraints. 
+Since PDLB has no existing users, we can take the most technically optimal approach without backward compatibility constraints.
 
 ### **Technical Challenges (Still Present)**
 
@@ -1237,7 +1237,7 @@ Since PDLB has no existing users, we can take the most technically optimal appro
 
 **Phase 1: Core PD Integration (3-4 weeks)**
 - Copy essential PDLB types into Router codebase
-- Add PrefillDecode Router variant  
+- Add PrefillDecode Router variant
 - Implement bootstrap injection for PD requests
 - Basic dual-dispatch mechanism
 
@@ -1321,27 +1321,27 @@ graph LR
     A[Starting Point] --> B[Week 1-4]
     B --> C[Week 5-8]
     C --> D[Week 9-10]
-    
+
     subgraph A[Starting Point]
         A1[Router Base<br/>- Solid Foundation<br/>- CacheAware LB]
         A2[PDLB Code<br/>- Extract Bootstrap<br/>- Extract EngineInfo]
     end
-    
+
     subgraph B[Core PD Build]
         B1[Copy PDLB Types<br/>- Bootstrap trait<br/>- SingleOrBatch]
         B2[Router Extension<br/>- PrefillDecode variant<br/>- Dual dispatch]
     end
-    
+
     subgraph C[Intelligence Layer]
         C1[Cache-Aware PD<br/>- Adapt Tree for PD<br/>- Smart Selection]
         C2[Full Integration<br/>- Metrics<br/>- Service Discovery]
     end
-    
+
     subgraph D[Ship It!]
         D1[Unified Router<br/>- All Features<br/>- Production Ready]
         D2[Clean Docs<br/>- No Migration Guide<br/>- Simple Examples]
     end
-    
+
     style C1 fill:#90EE90
     style D1 fill:#FFD700
     style A2 fill:#FFB6C1,stroke-dasharray: 5 5
@@ -1396,14 +1396,14 @@ router = Router(
         "http://decode3:8080",
     ],
     policy=PolicyType.CacheAware,
-    
+
     # Cache-aware parameters
     cache_threshold=0.6,              # 60% match required for cache hit
     balance_abs_threshold=32,         # Load imbalance threshold
     balance_rel_threshold=1.2,        # Relative load threshold
     eviction_interval_secs=60,        # Tree cleanup interval
     max_tree_size=1000000,            # Max characters per worker in tree
-    
+
     # Standard parameters
     worker_startup_timeout_secs=300,
     verbose=True,
@@ -1425,18 +1425,18 @@ router = Router.new_pd(
     ],
     decode_urls=[
         "http://d1:8080",
-        "http://d2:8080", 
+        "http://d2:8080",
         "http://d3:8080",
     ],
     policy="cache_aware",  # Options: "random", "po2", "cache_aware"
-    
+
     # Cache-aware specific params
     cache_threshold=0.7,
     balance_abs_threshold=20,
     balance_rel_threshold=1.1,
     eviction_interval_secs=30,
     max_tree_size=500000,
-    
+
     # Standard params
     host="0.0.0.0",
     port=8080,
@@ -1451,13 +1451,13 @@ router = Router.new_pd(
 # Monitor cache performance via Prometheus metrics
 # Available metrics:
 # - sgl_router_pd_cache_hits_total
-# - sgl_router_pd_cache_misses_total  
+# - sgl_router_pd_cache_misses_total
 # - sgl_router_pd_cache_match_rate
 # - sgl_router_pd_tree_memory_usage_chars
 # - sgl_router_pd_selection_duration_seconds
 
 # Example Grafana query for cache hit rate:
-# rate(sgl_router_pd_cache_hits_total[5m]) / 
+# rate(sgl_router_pd_cache_hits_total[5m]) /
 # (rate(sgl_router_pd_cache_hits_total[5m]) + rate(sgl_router_pd_cache_misses_total[5m]))
 ```
 
@@ -1478,4 +1478,4 @@ Since PDLB has no existing users, we can build the ideal unified router without 
 - **Production-ready** with comprehensive metrics, health checking, and service discovery
 - **Clean API design** with dedicated PD constructor for ease of use
 
-By taking the best ideas from both PDLB and Router, we can deliver a powerful, unified routing solution that significantly improves performance for production inference workloads - and we can do it faster and cleaner than originally planned! 
+By taking the best ideas from both PDLB and Router, we can deliver a powerful, unified routing solution that significantly improves performance for production inference workloads - and we can do it faster and cleaner than originally planned!
