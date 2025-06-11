@@ -564,21 +564,21 @@ impl PDRouter {
         let p1_load = loads
             .get(&prefill_list[p1_idx].url)
             .copied()
-            .unwrap_or(isize::MAX);
+            .unwrap_or(0);
         let p2_load = loads
             .get(&prefill_list[p2_idx].url)
             .copied()
-            .unwrap_or(isize::MAX);
+            .unwrap_or(0);
         let d1_load = loads
             .get(&decode_list[d1_idx].url)
             .copied()
-            .unwrap_or(isize::MAX);
+            .unwrap_or(0);
         let d2_load = loads
             .get(&decode_list[d2_idx].url)
             .copied()
-            .unwrap_or(isize::MAX);
+            .unwrap_or(0);
 
-        debug!(
+        info!(
             "Power-of-two selection - Prefill: {}={} vs {}={} | Decode: {}={} vs {}={}",
             prefill_list[p1_idx].url,
             p1_load,
@@ -625,7 +625,7 @@ impl PDRouter {
                     let client = client.clone();
                     let url = url.clone();
                     async move {
-                        let load = get_worker_load(&client, &url).await.unwrap_or(isize::MAX);
+                        let load = get_worker_load(&client, &url).await.unwrap_or(0);
                         (url, load)
                     }
                 })
@@ -637,6 +637,7 @@ impl PDRouter {
                 loads.insert(url, load);
             }
 
+            debug!("Worker loads updated: {:?}", loads);
             let _ = tx.send(loads);
             tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         }
