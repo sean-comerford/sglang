@@ -233,7 +233,7 @@ class RouterArgs:
             use_router_prefix: If True, look for arguments with 'router-' prefix
         """
         prefix = "router_" if use_router_prefix else ""
-        worker_urls = args.worker_urls if args.worker_urls is not None else []
+        worker_urls = getattr(args, 'worker_urls', [])
 
         # Parse PD URLs
         prefill_urls = cls._parse_prefill_urls(
