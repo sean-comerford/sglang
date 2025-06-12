@@ -130,43 +130,44 @@ async fn get_model_info(req: HttpRequest, data: web::Data<AppState>) -> impl Res
 }
 
 #[post("/generate")]
-async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> impl Responder {
-    // For PD mode, we should use typed request handling
+async fn generate(
+    req: HttpRequest,
+    typed_req: web::Json<GenerateReqInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
-        // Parse as typed request for PD mode
-        match serde_json::from_slice::<GenerateReqInput>(&body) {
-            Ok(typed_req) => {
-                // Debug logging to understand the request structure
-                info!(
-                    "PD generate request - batch_size: {:?}",
-                    typed_req.get_batch_size()
-                );
-                if let Some(input_ids) = &typed_req.input_ids {
-                    match input_ids {
-                        crate::pd_types::SingleOrBatch::Single(ids) => {
-                            info!("Single request with {} tokens", ids.len());
-                        }
-                        crate::pd_types::SingleOrBatch::Batch(batch) => {
-                            info!("Batch request with {} sequences", batch.len());
-                        }
-                    }
+        let typed_req = typed_req.into_inner();
+        
+        // Debug logging to understand the request structure
+        info!(
+            "PD generate request - batch_size: {:?}",
+            typed_req.get_batch_size()
+        );
+        if let Some(input_ids) = &typed_req.input_ids {
+            match input_ids {
+                crate::pd_types::SingleOrBatch::Single(ids) => {
+                    info!("Single request with {} tokens", ids.len());
                 }
-
-                data.router
-                    .route_pd_generate_typed(&data.client, &req, typed_req, "/generate")
-                    .await
-            }
-            Err(e) => {
-                error!("Failed to parse GenerateReqInput: {}", e);
-                // Log the raw body for debugging
-                if let Ok(body_str) = std::str::from_utf8(&body) {
-                    error!("Raw body: {}", body_str);
+                crate::pd_types::SingleOrBatch::Batch(batch) => {
+                    info!("Batch request with {} sequences", batch.len());
                 }
-                HttpResponse::BadRequest().body(format!("Invalid request: {}", e))
             }
         }
+
+        data.router
+            .route_pd_generate_typed(&data.client, &req, typed_req, "/generate")
+            .await
     } else {
-        // Regular mode - use existing logic
+        // Regular mode - convert back to bytes for compatibility
+        let body = match serde_json::to_vec(&typed_req.into_inner()) {
+            Ok(bytes) => Bytes::from(bytes),
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Failed to serialize request: {}", e))
+            }
+        };
+        
         data.router
             .route_generate_request(&data.client, &req, &body, "/generate")
             .await
@@ -176,22 +177,26 @@ async fn generate(req: HttpRequest, body: Bytes, data: web::Data<AppState>) -> i
 #[post("/v1/chat/completions")]
 async fn v1_chat_completions(
     req: HttpRequest,
-    body: Bytes,
+    typed_req: web::Json<ChatReqInput>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    // For PD mode, we should use typed request handling
+    // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
-        // Parse as typed request for PD mode
-        match serde_json::from_slice::<ChatReqInput>(&body) {
-            Ok(typed_req) => {
-                data.router
-                    .route_pd_chat_typed(&data.client, &req, typed_req, "/v1/chat/completions")
-                    .await
-            }
-            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
-        }
+        let typed_req = typed_req.into_inner();
+        
+        data.router
+            .route_pd_chat_typed(&data.client, &req, typed_req, "/v1/chat/completions")
+            .await
     } else {
-        // Regular mode - use existing logic
+        // Regular mode - convert back to bytes for compatibility
+        let body = match serde_json::to_vec(&typed_req.into_inner()) {
+            Ok(bytes) => Bytes::from(bytes),
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Failed to serialize request: {}", e))
+            }
+        };
+        
         data.router
             .route_generate_request(&data.client, &req, &body, "/v1/chat/completions")
             .await
@@ -201,22 +206,26 @@ async fn v1_chat_completions(
 #[post("/v1/completions")]
 async fn v1_completions(
     req: HttpRequest,
-    body: Bytes,
+    typed_req: web::Json<GenerateReqInput>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    // For PD mode, we should use typed request handling
+    // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
-        // Parse as typed request for PD mode - reuse GenerateReqInput
-        match serde_json::from_slice::<GenerateReqInput>(&body) {
-            Ok(typed_req) => {
-                data.router
-                    .route_pd_generate_typed(&data.client, &req, typed_req, "/v1/completions")
-                    .await
-            }
-            Err(e) => HttpResponse::BadRequest().body(format!("Invalid request: {}", e)),
-        }
+        let typed_req = typed_req.into_inner();
+        
+        data.router
+            .route_pd_generate_typed(&data.client, &req, typed_req, "/v1/completions")
+            .await
     } else {
-        // Regular mode - use existing logic
+        // Regular mode - convert back to bytes for compatibility
+        let body = match serde_json::to_vec(&typed_req.into_inner()) {
+            Ok(bytes) => Bytes::from(bytes),
+            Err(e) => {
+                return HttpResponse::InternalServerError()
+                    .body(format!("Failed to serialize request: {}", e))
+            }
+        };
+        
         data.router
             .route_generate_request(&data.client, &req, &body, "/v1/completions")
             .await

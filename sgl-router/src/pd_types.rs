@@ -62,7 +62,6 @@ pub enum PDSelectionPolicy {
         balance_rel_threshold: f32,
     },
 }
-
 // Bootstrap types from PDLB
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -224,3 +223,4 @@ impl Bootstrap for ChatReqInput {
         self.bootstrap_room = Some(bootstrap_room);
     }
 }
+

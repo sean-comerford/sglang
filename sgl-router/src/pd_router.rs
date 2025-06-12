@@ -6,13 +6,80 @@ use crate::tree::Tree;
 use ::metrics::{counter, histogram};
 use actix_web::http::header::{HeaderValue, CONTENT_TYPE};
 use actix_web::{HttpRequest, HttpResponse};
+use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+// ProxyResponse structure for proper error propagation
+pub enum ProxyResponseBody {
+    Full(bytes::Bytes),
+    Stream(Pin<Box<dyn Stream<Item = Result<bytes::Bytes, actix_web::Error>> + Send>>),
+}
+
+impl std::fmt::Debug for ProxyResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyResponseBody::Full(bytes) => write!(f, "Full({} bytes)", bytes.len()),
+            ProxyResponseBody::Stream(_) => write!(f, "Stream(...)"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ProxyResponse {
+    pub status: actix_web::http::StatusCode,
+    pub body: ProxyResponseBody,
+    pub headers: Vec<(String, String)>,
+}
+
+impl ProxyResponse {
+    pub fn new(status: actix_web::http::StatusCode) -> Self {
+        ProxyResponse {
+            status,
+            body: ProxyResponseBody::Full(bytes::Bytes::new()),
+            headers: Vec::new(),
+        }
+    }
+
+    pub fn with_body(mut self, body: bytes::Bytes) -> Self {
+        self.body = ProxyResponseBody::Full(body);
+        self
+    }
+
+    pub fn with_stream<S>(mut self, stream: S) -> Self 
+    where
+        S: Stream<Item = Result<bytes::Bytes, actix_web::Error>> + Send + 'static,
+    {
+        self.body = ProxyResponseBody::Stream(Box::pin(stream));
+        self
+    }
+
+    pub fn add_header(mut self, name: String, value: String) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+
+    pub fn into_http_response(self) -> HttpResponse {
+        let mut response = HttpResponse::build(self.status);
+        
+        // Add headers
+        for (name, value) in self.headers {
+            response.insert_header((name, value));
+        }
+        
+        // Set body
+        match self.body {
+            ProxyResponseBody::Full(body) => response.body(body.to_vec()),
+            ProxyResponseBody::Stream(stream) => response.streaming(stream),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct PDRouter {
@@ -329,6 +396,17 @@ impl PDRouter {
                 if !status.is_success() {
                     counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string()).increment(1);
                     error!("Decode server {} returned error status: {}", decode.url, status);
+                    
+                    // Return the error response from decode server
+                    match res.bytes().await {
+                        Ok(error_body) => {
+                            return HttpResponse::build(status).body(error_body.to_vec());
+                        }
+                        Err(e) => {
+                            return HttpResponse::build(status)
+                                .body(format!("Decode server error: {}", e));
+                        }
+                    }
                 }
                 
                 // Log prefill errors for debugging
