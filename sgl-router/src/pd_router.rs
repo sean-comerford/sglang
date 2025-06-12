@@ -614,7 +614,12 @@ impl PDRouter {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|_| {
+                reqwest::Client::builder()
+                    .timeout(Duration::from_millis(500))
+                    .build()
+                    .unwrap_or_default()
+            });
 
         loop {
             let mut loads = HashMap::new();

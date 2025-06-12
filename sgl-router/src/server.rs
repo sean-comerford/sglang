@@ -343,6 +343,7 @@ pub async fn startup(config: ServerConfig) -> std::io::Result<()> {
 
     let client = Client::builder()
         .pool_idle_timeout(Some(Duration::from_secs(50)))
+        .timeout(Duration::from_secs(600))  // Add request timeout (10 minutes, matching original PDLB)
         .build()
         .expect("Failed to create HTTP client");
 

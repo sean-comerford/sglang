@@ -310,7 +310,10 @@ impl Router {
         interval_secs: u64,
     ) -> Result<(), String> {
         let start_time = std::time::Instant::now();
-        let sync_client = reqwest::blocking::Client::new();
+        let sync_client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
         loop {
             if start_time.elapsed() > Duration::from_secs(timeout_secs) {
@@ -931,7 +934,10 @@ impl Router {
         };
 
         let start_time = std::time::Instant::now();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
         loop {
             if start_time.elapsed() > Duration::from_secs(timeout_secs) {
