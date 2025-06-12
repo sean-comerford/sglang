@@ -3,110 +3,46 @@
 
 use crate::pd_types::{Bootstrap, ChatReqInput, EngineInfo, GenerateReqInput, PDSelectionPolicy};
 use crate::tree::Tree;
-use ::metrics::{counter, histogram};
 use actix_web::http::header::{HeaderValue, CONTENT_TYPE};
 use actix_web::{HttpRequest, HttpResponse};
-use futures::Stream;
 use futures_util::{StreamExt, TryStreamExt};
+use metrics::{counter, histogram};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-// ProxyResponse structure for proper error propagation
-pub enum ProxyResponseBody {
-    Full(bytes::Bytes),
-    Stream(Pin<Box<dyn Stream<Item = Result<bytes::Bytes, actix_web::Error>> + Send>>),
-}
-
-impl std::fmt::Debug for ProxyResponseBody {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProxyResponseBody::Full(bytes) => write!(f, "Full({} bytes)", bytes.len()),
-            ProxyResponseBody::Stream(_) => write!(f, "Stream(...)"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ProxyResponse {
-    pub status: actix_web::http::StatusCode,
-    pub body: ProxyResponseBody,
-    pub headers: Vec<(String, String)>,
-}
-
-impl ProxyResponse {
-    pub fn new(status: actix_web::http::StatusCode) -> Self {
-        ProxyResponse {
-            status,
-            body: ProxyResponseBody::Full(bytes::Bytes::new()),
-            headers: Vec::new(),
-        }
-    }
-
-    pub fn with_body(mut self, body: bytes::Bytes) -> Self {
-        self.body = ProxyResponseBody::Full(body);
-        self
-    }
-
-    pub fn with_stream<S>(mut self, stream: S) -> Self 
-    where
-        S: Stream<Item = Result<bytes::Bytes, actix_web::Error>> + Send + 'static,
-    {
-        self.body = ProxyResponseBody::Stream(Box::pin(stream));
-        self
-    }
-
-    pub fn add_header(mut self, name: String, value: String) -> Self {
-        self.headers.push((name, value));
-        self
-    }
-
-    pub fn into_http_response(self) -> HttpResponse {
-        let mut response = HttpResponse::build(self.status);
-        
-        // Add headers
-        for (name, value) in self.headers {
-            response.insert_header((name, value));
-        }
-        
-        // Set body
-        match self.body {
-            ProxyResponseBody::Full(body) => response.body(body.to_vec()),
-            ProxyResponseBody::Stream(stream) => response.streaming(stream),
-        }
-    }
-}
+// Removed over-engineered ProxyResponse - using HttpResponse directly
 
 #[derive(Debug)]
 pub struct PDRouter {
     pub prefill_workers: Arc<RwLock<Vec<EngineInfo>>>,
     pub decode_workers: Arc<RwLock<Vec<EngineInfo>>>,
     pub selection_policy: PDSelectionPolicy,
-    pub load_tracking: Arc<Mutex<HashMap<String, usize>>>,
+    pub load_tracking: Arc<dashmap::DashMap<String, Arc<AtomicUsize>>>,
     pub prefill_tree: Option<Arc<Mutex<Tree>>>,
     pub timeout_secs: u64,
     pub interval_secs: u64,
     pub worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
-    pub _load_monitor_handle: Option<tokio::task::JoinHandle<()>>,
+    pub load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    pub http_client: reqwest::Client,
 }
 
 // RAII guard for load tracking to ensure cleanup even on panic
 struct LoadGuard<'a> {
-    tracking: &'a Arc<Mutex<HashMap<String, usize>>>,
+    tracking: &'a Arc<dashmap::DashMap<String, Arc<AtomicUsize>>>,
     urls: Vec<String>,
 }
 
 impl<'a> LoadGuard<'a> {
-    fn new(tracking: &'a Arc<Mutex<HashMap<String, usize>>>, urls: Vec<String>) -> Self {
+    fn new(tracking: &'a Arc<dashmap::DashMap<String, Arc<AtomicUsize>>>, urls: Vec<String>) -> Self {
         // Increment counters
-        if let Ok(mut map) = tracking.lock() {
-            for url in &urls {
-                *map.entry(url.clone()).or_insert(0) += 1;
-            }
+        for url in &urls {
+            let counter = tracking.entry(url.clone()).or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+            counter.fetch_add(1, Ordering::Relaxed);
         }
         LoadGuard { tracking, urls }
     }
@@ -115,11 +51,9 @@ impl<'a> LoadGuard<'a> {
 impl Drop for LoadGuard<'_> {
     fn drop(&mut self) {
         // Guaranteed cleanup even on panic
-        if let Ok(mut map) = self.tracking.lock() {
-            for url in &self.urls {
-                if let Some(count) = map.get_mut(url) {
-                    *count = count.saturating_sub(1);
-                }
+        for url in &self.urls {
+            if let Some(counter) = self.tracking.get(url) {
+                counter.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -158,13 +92,13 @@ impl PDRouter {
             .collect();
         crate::router::Router::wait_for_healthy_workers(&all_urls, timeout_secs, interval_secs)?;
 
-        // Initialize load tracking
-        let mut load_tracking = HashMap::new();
+        // Initialize load tracking with atomic counters
+        let load_tracking = Arc::new(dashmap::DashMap::new());
         for engine in &prefill_workers {
-            load_tracking.insert(engine.url.clone(), 0);
+            load_tracking.insert(engine.url.clone(), Arc::new(AtomicUsize::new(0)));
         }
         for engine in &decode_workers {
-            load_tracking.insert(engine.url.clone(), 0);
+            load_tracking.insert(engine.url.clone(), Arc::new(AtomicUsize::new(0)));
         }
 
         // Initialize cache-aware components if needed
@@ -184,13 +118,20 @@ impl PDRouter {
         let (tx, rx) = tokio::sync::watch::channel(HashMap::new());
         let worker_loads = Arc::new(rx);
 
+        // Create a shared HTTP client for all operations
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
         let load_monitor_handle = if matches!(selection_policy, PDSelectionPolicy::PowerOfTwo) {
             let monitor_urls = all_urls.clone();
             let monitor_interval = interval_secs;
+            let monitor_client = http_client.clone();
 
-            Some(tokio::spawn(async move {
-                Self::monitor_worker_loads(monitor_urls, tx, monitor_interval).await;
-            }))
+            Some(Arc::new(tokio::spawn(async move {
+                Self::monitor_worker_loads_with_client(monitor_urls, tx, monitor_interval, monitor_client).await;
+            })))
         } else {
             None
         };
@@ -199,12 +140,13 @@ impl PDRouter {
             prefill_workers: Arc::new(RwLock::new(prefill_workers)),
             decode_workers: Arc::new(RwLock::new(decode_workers)),
             selection_policy,
-            load_tracking: Arc::new(Mutex::new(load_tracking)),
+            load_tracking,
             prefill_tree,
             timeout_secs,
             interval_secs,
             worker_loads,
-            _load_monitor_handle: load_monitor_handle,
+            load_monitor_handle,
+            http_client,
         })
     }
 
@@ -396,7 +338,7 @@ impl PDRouter {
                 if !status.is_success() {
                     counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string()).increment(1);
                     error!("Decode server {} returned error status: {}", decode.url, status);
-                    
+
                     // Return the error response from decode server
                     match res.bytes().await {
                         Ok(error_body) => {
@@ -408,7 +350,7 @@ impl PDRouter {
                         }
                     }
                 }
-                
+
                 // Log prefill errors for debugging
                 if let Err(e) = &prefill_result {
                     error!("Prefill server {} failed (non-critical): {}", prefill.url, e);
@@ -416,119 +358,46 @@ impl PDRouter {
                 }
 
                 if is_stream {
-                    // Streaming response with logprob merging if needed
+                    // Streaming response
                     if return_logprob {
-                        // Need to merge prefill logprobs with decode stream
-                        match prefill_result {
+                        // Get prefill logprobs for merging
+                        let prefill_logprobs = match prefill_result {
                             Ok(prefill_res) => {
-                                match prefill_res.bytes_stream().next().await {
-                                    Some(Ok(prefill_chunk)) => {
-                                        // Parse first prefill chunk for input_token_logprobs
-                                        let chunk_str = std::str::from_utf8(&prefill_chunk)
-                                            .unwrap_or("")
-                                            .trim_start_matches("data: ")
-                                            .trim();
-
-                                        match serde_json::from_str::<Value>(chunk_str) {
-                                            Ok(prefill_json) => {
-                                                let prefill_logprobs = prefill_json
-                                                    .get("meta_info")
-                                                    .and_then(|m| m.get("input_token_logprobs"))
-                                                    .cloned();
-
-                                                // Stream decode response with merged logprobs
-                                                HttpResponse::build(status)
-                                                    .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                                                    .streaming(
-                                                        res.bytes_stream()
-                                                            .map(move |chunk_result| {
-                                                                match chunk_result {
-                                                                    Ok(chunk) => {
-                                                                        // Try to parse and merge logprobs
-                                                                        if let Ok(chunk_str) = std::str::from_utf8(&chunk) {
-                                                                            if chunk_str.starts_with("data: ") && !chunk_str.contains("[DONE]") {
-                                                                                let json_str = &chunk_str[6..].trim();
-                                                                                if let Ok(mut decode_json) = serde_json::from_str::<Value>(json_str) {
-                                                                                    // Merge prefill logprobs if available
-                                                                                    if let Some(ref p_logprobs) = prefill_logprobs {
-                                                                                        if let Some(meta) = decode_json.get_mut("meta_info") {
-                                                                                            if let Some(d_logprobs) = meta.get_mut("input_token_logprobs") {
-                                                                                                if let (Some(p_arr), Some(d_arr)) = (p_logprobs.as_array(), d_logprobs.as_array()) {
-                                                                                                    let mut merged = p_arr.clone();
-                                                                                                    merged.extend(d_arr.clone());
-                                                                                                    *d_logprobs = Value::Array(merged);
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                    // Re-serialize with merged data
-                                                                                    let merged_str = format!("data: {}\n\n", serde_json::to_string(&decode_json).unwrap_or_default());
-                                                                                    return Ok(bytes::Bytes::from(merged_str));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                        Ok(chunk)
-                                                                    }
-                                                                    Err(e) => Err(actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e)))
-                                                                }
-                                                            })
-                                                    )
-                                            }
-                                            Err(_) => {
-                                                warn!("Failed to parse prefill response for logprob merging");
-                                                HttpResponse::build(status)
-                                                    .insert_header((
-                                                        CONTENT_TYPE,
-                                                        HeaderValue::from_static(
-                                                            "text/event-stream",
-                                                        ),
-                                                    ))
-                                                    .streaming(res.bytes_stream().map_err(|e| {
-                                                        actix_web::error::ErrorInternalServerError(
-                                                            format!("Stream error: {}", e),
-                                                        )
-                                                    }))
-                                            }
-                                        }
+                                match prefill_res.bytes().await {
+                                    Ok(body) => {
+                                        serde_json::from_slice::<Value>(&body)
+                                            .ok()
+                                            .and_then(|json| json.pointer("/meta_info/input_token_logprobs").cloned())
                                     }
-                                    _ => {
-                                        warn!("Failed to get prefill stream chunk");
-                                        HttpResponse::build(status)
-                                            .insert_header((
-                                                CONTENT_TYPE,
-                                                HeaderValue::from_static("text/event-stream"),
-                                            ))
-                                            .streaming(res.bytes_stream().map_err(|e| {
-                                                actix_web::error::ErrorInternalServerError(format!(
-                                                    "Stream error: {}",
-                                                    e
-                                                ))
-                                            }))
-                                    }
+                                    Err(_) => None,
                                 }
                             }
-                            Err(_) => {
-                                // Prefill failed, just stream decode without merging
-                                HttpResponse::build(status)
-                                    .insert_header((
-                                        CONTENT_TYPE,
-                                        HeaderValue::from_static("text/event-stream"),
-                                    ))
-                                    .streaming(res.bytes_stream().map_err(|e| {
-                                        actix_web::error::ErrorInternalServerError(format!(
-                                            "Stream error: {}",
-                                            e
-                                        ))
-                                    }))
-                            }
-                        }
+                            Err(_) => None,
+                        };
+
+                        // Stream with logprob merging
+                        HttpResponse::build(status)
+                            .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
+                            .streaming(
+                                res.bytes_stream()
+                                    .map(move |chunk_result| {
+                                        match chunk_result {
+                                            Ok(chunk) => {
+                                                // Try to merge logprobs
+                                                if let Ok(merged) = Self::merge_streaming_logprobs(prefill_logprobs.clone(), &chunk) {
+                                                    Ok(merged)
+                                                } else {
+                                                    Ok(chunk)
+                                                }
+                                            }
+                                            Err(e) => Err(actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e)))
+                                        }
+                                    })
+                            )
                     } else {
                         // No logprob merging needed
                         HttpResponse::build(status)
-                            .insert_header((
-                                CONTENT_TYPE,
-                                HeaderValue::from_static("text/event-stream"),
-                            ))
+                            .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
                             .streaming({
                                 let decode_url = decode.url.clone();
                                 res.bytes_stream().map_err(move |e| {
@@ -715,21 +584,13 @@ impl PDRouter {
         Ok((selected_prefill, selected_decode))
     }
 
-    // Background task to monitor worker loads
-    async fn monitor_worker_loads(
+    // Background task to monitor worker loads with shared client
+    async fn monitor_worker_loads_with_client(
         worker_urls: Vec<String>,
         tx: tokio::sync::watch::Sender<HashMap<String, isize>>,
         interval_secs: u64,
+        client: reqwest::Client,
     ) {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
-            .build()
-            .unwrap_or_else(|_| {
-                reqwest::Client::builder()
-                    .timeout(Duration::from_millis(500))
-                    .build()
-                    .unwrap_or_default()
-            });
 
         loop {
             let mut loads = HashMap::new();
@@ -753,15 +614,48 @@ impl PDRouter {
             }
 
             debug!("Worker loads updated: {:?}", loads);
-            
+
             // Check if receiver is still active
             if tx.send(loads).is_err() {
                 info!("Load monitor receiver dropped, shutting down monitor task");
                 break;
             }
-            
+
             tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         }
+    }
+
+    // Simple helper to merge logprobs in streaming responses
+    fn merge_streaming_logprobs(
+        prefill_logprobs: Option<Value>,
+        decode_chunk: &[u8],
+    ) -> Result<bytes::Bytes, ()> {
+        // Skip non-data chunks
+        let chunk_str = std::str::from_utf8(decode_chunk).map_err(|_| ())?;
+        if !chunk_str.starts_with("data: ") || chunk_str.contains("[DONE]") {
+            return Err(());
+        }
+
+        // Parse JSON from chunk
+        let json_str = chunk_str.trim_start_matches("data: ").trim();
+        let mut decode_json: Value = serde_json::from_str(json_str).map_err(|_| ())?;
+
+        // Merge prefill logprobs if available
+        if let Some(ref p_logprobs) = prefill_logprobs {
+            if let Some(meta) = decode_json.get_mut("meta_info") {
+                if let Some(d_logprobs) = meta.get_mut("input_token_logprobs") {
+                    if let (Some(p_arr), Some(d_arr)) = (p_logprobs.as_array(), d_logprobs.as_array()) {
+                        let mut merged = p_arr.clone();
+                        merged.extend(d_arr.clone());
+                        *d_logprobs = Value::Array(merged);
+                    }
+                }
+            }
+        }
+
+        // Re-serialize
+        let merged_str = format!("data: {}\n\n", serde_json::to_string(&decode_json).unwrap_or_default());
+        Ok(bytes::Bytes::from(merged_str))
     }
 }
 
@@ -817,18 +711,18 @@ impl PDRouter {
     pub async fn health_generate(&self, client: &reqwest::Client) -> HttpResponse {
         let mut all_healthy = true;
         let mut unhealthy_servers = Vec::new();
-        
+
         // Collect all worker URLs with their types
         let mut worker_infos = Vec::new();
-        
+
         for worker in self.prefill_workers.read().unwrap().iter() {
             worker_infos.push((worker.url.clone(), "prefill"));
         }
-        
+
         for worker in self.decode_workers.read().unwrap().iter() {
             worker_infos.push((worker.url.clone(), "decode"));
         }
-        
+
         // Create tasks with URL tracking
         let tasks: Vec<_> = worker_infos
             .iter()

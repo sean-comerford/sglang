@@ -137,7 +137,7 @@ impl GenerateReqInput {
         if self.text.is_some() && self.input_ids.is_some() {
             return Err("Both text and input_ids are present in the request".to_string());
         }
-        
+
         // Check text batch
         if let Some(InputText::Batch(texts)) = &self.text {
             if texts.is_empty() {
@@ -148,7 +148,7 @@ impl GenerateReqInput {
             }
             return Ok(Some(texts.len()));
         }
-        
+
         // Check input_ids batch
         if let Some(InputIds::Batch(ids)) = &self.input_ids {
             if ids.is_empty() {
@@ -165,7 +165,7 @@ impl GenerateReqInput {
             }
             return Ok(Some(ids.len()));
         }
-        
+
         Ok(None)
     }
 }
@@ -223,4 +223,3 @@ impl Bootstrap for ChatReqInput {
         self.bootstrap_room = Some(bootstrap_room);
     }
 }
-

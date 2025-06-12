@@ -138,7 +138,7 @@ async fn generate(
     // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
         let typed_req = typed_req.into_inner();
-        
+
         // Debug logging to understand the request structure
         info!(
             "PD generate request - batch_size: {:?}",
@@ -167,7 +167,7 @@ async fn generate(
                     .body(format!("Failed to serialize request: {}", e))
             }
         };
-        
+
         data.router
             .route_generate_request(&data.client, &req, &body, "/generate")
             .await
@@ -183,7 +183,7 @@ async fn v1_chat_completions(
     // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
         let typed_req = typed_req.into_inner();
-        
+
         data.router
             .route_pd_chat_typed(&data.client, &req, typed_req, "/v1/chat/completions")
             .await
@@ -196,7 +196,7 @@ async fn v1_chat_completions(
                     .body(format!("Failed to serialize request: {}", e))
             }
         };
-        
+
         data.router
             .route_generate_request(&data.client, &req, &body, "/v1/chat/completions")
             .await
@@ -212,7 +212,7 @@ async fn v1_completions(
     // For PD mode, use typed request handling with proper JSON extraction
     if data.router.is_prefill_decode() {
         let typed_req = typed_req.into_inner();
-        
+
         data.router
             .route_pd_generate_typed(&data.client, &req, typed_req, "/v1/completions")
             .await
@@ -225,7 +225,7 @@ async fn v1_completions(
                     .body(format!("Failed to serialize request: {}", e))
             }
         };
-        
+
         data.router
             .route_generate_request(&data.client, &req, &body, "/v1/completions")
             .await
