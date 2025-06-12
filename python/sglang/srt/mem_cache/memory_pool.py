@@ -55,6 +55,7 @@ class ReqToTokenPool:
         device: str,
         enable_memory_saver: bool,
     ):
+        print("Hello ***** Everybody ******************************")
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
