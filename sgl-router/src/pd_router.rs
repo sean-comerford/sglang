@@ -9,8 +9,8 @@ use futures_util::{StreamExt, TryStreamExt};
 use metrics::{counter, histogram};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -38,10 +38,15 @@ struct LoadGuard<'a> {
 }
 
 impl<'a> LoadGuard<'a> {
-    fn new(tracking: &'a Arc<dashmap::DashMap<String, Arc<AtomicUsize>>>, urls: Vec<String>) -> Self {
+    fn new(
+        tracking: &'a Arc<dashmap::DashMap<String, Arc<AtomicUsize>>>,
+        urls: Vec<String>,
+    ) -> Self {
         // Increment counters
         for url in &urls {
-            let counter = tracking.entry(url.clone()).or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+            let counter = tracking
+                .entry(url.clone())
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
             counter.fetch_add(1, Ordering::Relaxed);
         }
         LoadGuard { tracking, urls }
@@ -130,7 +135,13 @@ impl PDRouter {
             let monitor_client = http_client.clone();
 
             Some(Arc::new(tokio::spawn(async move {
-                Self::monitor_worker_loads_with_client(monitor_urls, tx, monitor_interval, monitor_client).await;
+                Self::monitor_worker_loads_with_client(
+                    monitor_urls,
+                    tx,
+                    monitor_interval,
+                    monitor_client,
+                )
+                .await;
             })))
         } else {
             None
@@ -300,7 +311,10 @@ impl PDRouter {
         start_time: Instant,
     ) -> HttpResponse {
         // Update load tracking for both workers
-        let _guard = LoadGuard::new(&self.load_tracking, vec![prefill.url.clone(), decode.url.clone()]);
+        let _guard = LoadGuard::new(
+            &self.load_tracking,
+            vec![prefill.url.clone(), decode.url.clone()],
+        );
 
         // Build requests using .json() method
         let mut prefill_request = client.post(prefill.api_path(route)).json(&json_request);
@@ -337,7 +351,10 @@ impl PDRouter {
 
                 if !status.is_success() {
                     counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string()).increment(1);
-                    error!("Decode server {} returned error status: {}", decode.url, status);
+                    error!(
+                        "Decode server {} returned error status: {}",
+                        decode.url, status
+                    );
 
                     // Return the error response from decode server
                     match res.bytes().await {
@@ -353,7 +370,10 @@ impl PDRouter {
 
                 // Log prefill errors for debugging
                 if let Err(e) = &prefill_result {
-                    error!("Prefill server {} failed (non-critical): {}", prefill.url, e);
+                    error!(
+                        "Prefill server {} failed (non-critical): {}",
+                        prefill.url, e
+                    );
                     counter!("sgl_router_pd_prefill_errors_total", "worker" => prefill.url.to_string()).increment(1);
                 }
 
@@ -361,39 +381,43 @@ impl PDRouter {
                     // Streaming response
                     if return_logprob {
                         // Get prefill logprobs for merging
-                        let prefill_logprobs = match prefill_result {
-                            Ok(prefill_res) => {
-                                match prefill_res.bytes().await {
-                                    Ok(body) => {
-                                        serde_json::from_slice::<Value>(&body)
-                                            .ok()
-                                            .and_then(|json| json.pointer("/meta_info/input_token_logprobs").cloned())
-                                    }
+                        let prefill_logprobs =
+                            match prefill_result {
+                                Ok(prefill_res) => match prefill_res.bytes().await {
+                                    Ok(body) => serde_json::from_slice::<Value>(&body)
+                                        .ok()
+                                        .and_then(|json| {
+                                            json.pointer("/meta_info/input_token_logprobs").cloned()
+                                        }),
                                     Err(_) => None,
-                                }
-                            }
-                            Err(_) => None,
-                        };
+                                },
+                                Err(_) => None,
+                            };
 
                         // Stream with logprob merging
                         HttpResponse::build(status)
-                            .insert_header((CONTENT_TYPE, HeaderValue::from_static("text/event-stream")))
-                            .streaming(
-                                res.bytes_stream()
-                                    .map(move |chunk_result| {
-                                        match chunk_result {
-                                            Ok(chunk) => {
-                                                // Try to merge logprobs
-                                                if let Ok(merged) = Self::merge_streaming_logprobs(prefill_logprobs.clone(), &chunk) {
-                                                    Ok(merged)
-                                                } else {
-                                                    Ok(chunk)
-                                                }
-                                            }
-                                            Err(e) => Err(actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e)))
+                            .insert_header((
+                                CONTENT_TYPE,
+                                HeaderValue::from_static("text/event-stream"),
+                            ))
+                            .streaming(res.bytes_stream().map(move |chunk_result| {
+                                match chunk_result {
+                                    Ok(chunk) => {
+                                        // Try to merge logprobs
+                                        if let Ok(merged) = Self::merge_streaming_logprobs(
+                                            prefill_logprobs.clone(),
+                                            &chunk,
+                                        ) {
+                                            Ok(merged)
+                                        } else {
+                                            Ok(chunk)
                                         }
-                                    })
-                            )
+                                    }
+                                    Err(e) => Err(actix_web::error::ErrorInternalServerError(
+                                        format!("Stream error: {}", e),
+                                    )),
+                                }
+                            }))
                     } else {
                         // No logprob merging needed
                         HttpResponse::build(status)
@@ -540,22 +564,10 @@ impl PDRouter {
 
         let loads = self.worker_loads.borrow();
 
-        let p1_load = loads
-            .get(&prefill_list[p1_idx].url)
-            .copied()
-            .unwrap_or(0);
-        let p2_load = loads
-            .get(&prefill_list[p2_idx].url)
-            .copied()
-            .unwrap_or(0);
-        let d1_load = loads
-            .get(&decode_list[d1_idx].url)
-            .copied()
-            .unwrap_or(0);
-        let d2_load = loads
-            .get(&decode_list[d2_idx].url)
-            .copied()
-            .unwrap_or(0);
+        let p1_load = loads.get(&prefill_list[p1_idx].url).copied().unwrap_or(0);
+        let p2_load = loads.get(&prefill_list[p2_idx].url).copied().unwrap_or(0);
+        let d1_load = loads.get(&decode_list[d1_idx].url).copied().unwrap_or(0);
+        let d2_load = loads.get(&decode_list[d2_idx].url).copied().unwrap_or(0);
 
         info!(
             "Power-of-two selection - Prefill: {}={} vs {}={} | Decode: {}={} vs {}={}",
@@ -591,7 +603,6 @@ impl PDRouter {
         interval_secs: u64,
         client: reqwest::Client,
     ) {
-
         loop {
             let mut loads = HashMap::new();
 
@@ -644,7 +655,9 @@ impl PDRouter {
         if let Some(ref p_logprobs) = prefill_logprobs {
             if let Some(meta) = decode_json.get_mut("meta_info") {
                 if let Some(d_logprobs) = meta.get_mut("input_token_logprobs") {
-                    if let (Some(p_arr), Some(d_arr)) = (p_logprobs.as_array(), d_logprobs.as_array()) {
+                    if let (Some(p_arr), Some(d_arr)) =
+                        (p_logprobs.as_array(), d_logprobs.as_array())
+                    {
                         let mut merged = p_arr.clone();
                         merged.extend(d_arr.clone());
                         *d_logprobs = Value::Array(merged);
@@ -654,7 +667,10 @@ impl PDRouter {
         }
 
         // Re-serialize
-        let merged_str = format!("data: {}\n\n", serde_json::to_string(&decode_json).unwrap_or_default());
+        let merged_str = format!(
+            "data: {}\n\n",
+            serde_json::to_string(&decode_json).unwrap_or_default()
+        );
         Ok(bytes::Bytes::from(merged_str))
     }
 }
@@ -743,7 +759,9 @@ impl PDRouter {
                     all_healthy = false;
                     let msg = format!(
                         "{} server {} returned status {}",
-                        worker_type, url, res.status()
+                        worker_type,
+                        url,
+                        res.status()
                     );
                     error!("{}", msg);
                     unhealthy_servers.push(msg);
@@ -835,8 +853,7 @@ impl PDRouter {
             // Send request directly without going through Router
             let mut request_builder = client.get(format!("{}/v1/models", worker_url));
             for (name, value) in crate::router::copy_request_headers(req) {
-                if name.to_lowercase() != "content-type"
-                    && name.to_lowercase() != "content-length"
+                if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length"
                 {
                     request_builder = request_builder.header(name, value);
                 }
@@ -914,11 +931,9 @@ impl PDRouter {
         };
 
         if let Some(worker_url) = first_worker_url {
-            let mut request_builder =
-                client.get(format!("{}/get_model_info", worker_url));
+            let mut request_builder = client.get(format!("{}/get_model_info", worker_url));
             for (name, value) in crate::router::copy_request_headers(req) {
-                if name.to_lowercase() != "content-type"
-                    && name.to_lowercase() != "content-length"
+                if name.to_lowercase() != "content-type" && name.to_lowercase() != "content-length"
                 {
                     request_builder = request_builder.header(name, value);
                 }

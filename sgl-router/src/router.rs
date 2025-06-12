@@ -1116,7 +1116,9 @@ impl Router {
         _req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => pd_router.health_generate(&pd_router.http_client).await,
+            Router::PrefillDecode { pd_router } => {
+                pd_router.health_generate(&pd_router.http_client).await
+            }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
@@ -1147,7 +1149,9 @@ impl Router {
     ) -> HttpResponse {
         match self {
             Router::PrefillDecode { pd_router } => {
-                pd_router.route_chat(&pd_router.http_client, req, typed_req, route).await
+                pd_router
+                    .route_chat(&pd_router.http_client, req, typed_req, route)
+                    .await
             }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
@@ -1159,21 +1163,31 @@ impl Router {
         _req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => pd_router.get_server_info(&pd_router.http_client).await,
+            Router::PrefillDecode { pd_router } => {
+                pd_router.get_server_info(&pd_router.http_client).await
+            }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
 
-    pub async fn get_pd_models(&self, _client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
+    pub async fn get_pd_models(
+        &self,
+        _client: &reqwest::Client,
+        req: &HttpRequest,
+    ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => pd_router.get_models(&pd_router.http_client, req).await,
+            Router::PrefillDecode { pd_router } => {
+                pd_router.get_models(&pd_router.http_client, req).await
+            }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
 
     pub async fn route_pd_flush_cache(&self, _client: &reqwest::Client) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => pd_router.flush_cache(&pd_router.http_client).await,
+            Router::PrefillDecode { pd_router } => {
+                pd_router.flush_cache(&pd_router.http_client).await
+            }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }
@@ -1184,7 +1198,9 @@ impl Router {
         req: &HttpRequest,
     ) -> HttpResponse {
         match self {
-            Router::PrefillDecode { pd_router } => pd_router.get_model_info(&pd_router.http_client, req).await,
+            Router::PrefillDecode { pd_router } => {
+                pd_router.get_model_info(&pd_router.http_client, req).await
+            }
             _ => HttpResponse::InternalServerError().body("Not in PrefillDecode mode"),
         }
     }

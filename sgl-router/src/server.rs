@@ -353,7 +353,7 @@ pub async fn startup(config: ServerConfig) -> std::io::Result<()> {
 
     let client = Client::builder()
         .pool_idle_timeout(Some(Duration::from_secs(50)))
-        .timeout(Duration::from_secs(config.request_timeout_secs))  // Use configurable timeout
+        .timeout(Duration::from_secs(config.request_timeout_secs)) // Use configurable timeout
         .build()
         .expect("Failed to create HTTP client");
 

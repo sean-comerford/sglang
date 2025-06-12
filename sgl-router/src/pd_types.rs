@@ -94,12 +94,16 @@ pub trait Bootstrap: Send + Sync {
                 BootstrapHost::Batch(vec![prefill_info.get_hostname(); batch_size]),
                 BootstrapPort::Batch(vec![prefill_info.bootstrap_port; batch_size]),
                 // Use high-quality random numbers to minimize collision risk
-                BootstrapRoom::Batch((0..batch_size).map(|_| {
-                    // Combine multiple sources of randomness for better distribution
-                    let r1 = rand::random::<u64>();
-                    let r2 = rand::random::<u64>();
-                    r1.wrapping_add(r2.rotate_left(32))
-                }).collect()),
+                BootstrapRoom::Batch(
+                    (0..batch_size)
+                        .map(|_| {
+                            // Combine multiple sources of randomness for better distribution
+                            let r1 = rand::random::<u64>();
+                            let r2 = rand::random::<u64>();
+                            r1.wrapping_add(r2.rotate_left(32))
+                        })
+                        .collect(),
+                ),
             );
         } else {
             self.set_bootstrap_info(
@@ -143,8 +147,12 @@ impl GenerateReqInput {
             if texts.is_empty() {
                 return Err("Batch text array is empty".to_string());
             }
-            if texts.len() > 10000 {  // Reasonable limit for production
-                return Err(format!("Batch size {} exceeds maximum allowed (10000)", texts.len()));
+            if texts.len() > 10000 {
+                // Reasonable limit for production
+                return Err(format!(
+                    "Batch size {} exceeds maximum allowed (10000)",
+                    texts.len()
+                ));
             }
             return Ok(Some(texts.len()));
         }
@@ -154,8 +162,12 @@ impl GenerateReqInput {
             if ids.is_empty() {
                 return Err("Batch input_ids array is empty".to_string());
             }
-            if ids.len() > 10000 {  // Reasonable limit for production
-                return Err(format!("Batch size {} exceeds maximum allowed (10000)", ids.len()));
+            if ids.len() > 10000 {
+                // Reasonable limit for production
+                return Err(format!(
+                    "Batch size {} exceeds maximum allowed (10000)",
+                    ids.len()
+                ));
             }
             // Validate each sequence is not empty
             for (i, seq) in ids.iter().enumerate() {
