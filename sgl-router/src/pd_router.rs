@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct PDRouter {
@@ -24,6 +25,37 @@ pub struct PDRouter {
     pub interval_secs: u64,
     pub worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
     pub _load_monitor_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+// RAII guard for load tracking to ensure cleanup even on panic
+struct LoadGuard<'a> {
+    tracking: &'a Arc<Mutex<HashMap<String, usize>>>,
+    urls: Vec<String>,
+}
+
+impl<'a> LoadGuard<'a> {
+    fn new(tracking: &'a Arc<Mutex<HashMap<String, usize>>>, urls: Vec<String>) -> Self {
+        // Increment counters
+        if let Ok(mut map) = tracking.lock() {
+            for url in &urls {
+                *map.entry(url.clone()).or_insert(0) += 1;
+            }
+        }
+        LoadGuard { tracking, urls }
+    }
+}
+
+impl Drop for LoadGuard<'_> {
+    fn drop(&mut self) {
+        // Guaranteed cleanup even on panic
+        if let Ok(mut map) = self.tracking.lock() {
+            for url in &self.urls {
+                if let Some(count) = map.get_mut(url) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+    }
 }
 
 impl PDRouter {
@@ -118,6 +150,7 @@ impl PDRouter {
         route: &str,
     ) -> HttpResponse {
         let start = Instant::now();
+        let _request_id = Uuid::new_v4();
 
         // Get stream flag and return_logprob flag before moving the request
         let is_stream = typed_req.is_stream();
@@ -244,6 +277,7 @@ impl PDRouter {
     }
 
     // Execute the dual dispatch to prefill and decode servers
+    #[allow(clippy::too_many_arguments)]
     async fn execute_dual_dispatch(
         &self,
         client: &reqwest::Client,
@@ -257,10 +291,7 @@ impl PDRouter {
         start_time: Instant,
     ) -> HttpResponse {
         // Update load tracking for both workers
-        if let Ok(mut tracking) = self.load_tracking.lock() {
-            *tracking.entry(prefill.url.clone()).or_insert(0) += 1;
-            *tracking.entry(decode.url.clone()).or_insert(0) += 1;
-        }
+        let _guard = LoadGuard::new(&self.load_tracking, vec![prefill.url.clone(), decode.url.clone()]);
 
         // Build requests using .json() method
         let mut prefill_request = client.post(prefill.api_path(route)).json(&json_request);
@@ -278,16 +309,6 @@ impl PDRouter {
         // Send both requests concurrently
         let (prefill_result, decode_result) =
             tokio::join!(prefill_request.send(), decode_request.send());
-
-        // Always decrement load tracking after requests complete
-        if let Ok(mut tracking) = self.load_tracking.lock() {
-            if let Some(count) = tracking.get_mut(&prefill.url) {
-                *count = count.saturating_sub(1);
-            }
-            if let Some(count) = tracking.get_mut(&decode.url) {
-                *count = count.saturating_sub(1);
-            }
-        }
 
         // Update metrics
         let duration = start_time.elapsed();
@@ -307,6 +328,13 @@ impl PDRouter {
 
                 if !status.is_success() {
                     counter!("sgl_router_pd_decode_errors_total", "worker" => decode.url.to_string()).increment(1);
+                    error!("Decode server {} returned error status: {}", decode.url, status);
+                }
+                
+                // Log prefill errors for debugging
+                if let Err(e) = &prefill_result {
+                    error!("Prefill server {} failed (non-critical): {}", prefill.url, e);
+                    counter!("sgl_router_pd_prefill_errors_total", "worker" => prefill.url.to_string()).increment(1);
                 }
 
                 if is_stream {
@@ -423,10 +451,14 @@ impl PDRouter {
                                 CONTENT_TYPE,
                                 HeaderValue::from_static("text/event-stream"),
                             ))
-                            .streaming(res.bytes_stream().map_err(|e| {
-                                error!("Stream error: {}", e);
-                                actix_web::error::ErrorInternalServerError("Stream error")
-                            }))
+                            .streaming({
+                                let decode_url = decode.url.clone();
+                                res.bytes_stream().map_err(move |e| {
+                                    error!("Stream error from decode server {}: {}", decode_url, e);
+                                    counter!("sgl_router_pd_stream_errors_total", "worker" => decode_url.to_string()).increment(1);
+                                    actix_web::error::ErrorInternalServerError(format!("Stream error: {}", e))
+                                })
+                            })
                     }
                 } else {
                     // Non-streaming response
@@ -643,7 +675,13 @@ impl PDRouter {
             }
 
             debug!("Worker loads updated: {:?}", loads);
-            let _ = tx.send(loads);
+            
+            // Check if receiver is still active
+            if tx.send(loads).is_err() {
+                info!("Load monitor receiver dropped, shutting down monitor task");
+                break;
+            }
+            
             tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         }
     }
@@ -701,36 +739,48 @@ impl PDRouter {
     pub async fn health_generate(&self, client: &reqwest::Client) -> HttpResponse {
         let mut all_healthy = true;
         let mut unhealthy_servers = Vec::new();
-        let mut tasks = Vec::new();
-
+        
+        // Collect all worker URLs with their types
+        let mut worker_infos = Vec::new();
+        
         for worker in self.prefill_workers.read().unwrap().iter() {
-            let url = format!("{}/health_generate", worker.url);
-            // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
-            tasks.push(client.get(&url).send());
+            worker_infos.push((worker.url.clone(), "prefill"));
         }
-
+        
         for worker in self.decode_workers.read().unwrap().iter() {
-            let url = format!("{}/health_generate", worker.url);
-            // Note: Python mini_lb uses POST, but we use GET to match original Rust PDLB
-            tasks.push(client.get(&url).send());
+            worker_infos.push((worker.url.clone(), "decode"));
         }
+        
+        // Create tasks with URL tracking
+        let tasks: Vec<_> = worker_infos
+            .iter()
+            .map(|(url, _)| {
+                let health_url = format!("{}/health_generate", url);
+                client.get(&health_url).send()
+            })
+            .collect();
 
         let results = futures_util::future::join_all(tasks).await;
 
-        for (i, result) in results.into_iter().enumerate() {
+        for ((url, worker_type), result) in worker_infos.iter().zip(results.into_iter()) {
             match result {
-                Ok(res) if res.status().is_success() => {}
+                Ok(res) if res.status().is_success() => {
+                    debug!("Health check passed for {} server: {}", worker_type, url);
+                }
                 Ok(res) => {
                     all_healthy = false;
-                    unhealthy_servers.push(format!(
-                        "Server {} returned status {}",
-                        i,
-                        res.status()
-                    ));
+                    let msg = format!(
+                        "{} server {} returned status {}",
+                        worker_type, url, res.status()
+                    );
+                    error!("{}", msg);
+                    unhealthy_servers.push(msg);
                 }
                 Err(e) => {
                     all_healthy = false;
-                    unhealthy_servers.push(format!("Server {} error: {}", i, e));
+                    let msg = format!("{} server {} error: {}", worker_type, url, e);
+                    error!("{}", msg);
+                    unhealthy_servers.push(msg);
                 }
             }
         }

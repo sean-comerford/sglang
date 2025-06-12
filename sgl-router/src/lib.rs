@@ -43,6 +43,7 @@ struct Router {
     service_discovery_namespace: Option<String>,
     prometheus_port: Option<u16>,
     prometheus_host: Option<String>,
+    request_timeout_secs: u64,
     // PD-specific fields
     prefill_urls: Option<Vec<(String, Option<u16>)>>,
     decode_urls: Option<Vec<String>>,
@@ -72,7 +73,8 @@ impl Router {
         service_discovery_port = 80,
         service_discovery_namespace = None,
         prometheus_port = None,
-        prometheus_host = None
+        prometheus_host = None,
+        request_timeout_secs = 600  // Add configurable request timeout
     ))]
     fn new(
         worker_urls: Vec<String>,
@@ -95,6 +97,7 @@ impl Router {
         service_discovery_namespace: Option<String>,
         prometheus_port: Option<u16>,
         prometheus_host: Option<String>,
+        request_timeout_secs: u64,
     ) -> PyResult<Self> {
         Ok(Router {
             host,
@@ -117,6 +120,7 @@ impl Router {
             service_discovery_namespace,
             prometheus_port,
             prometheus_host,
+            request_timeout_secs,
             // PD-specific fields (None for regular mode)
             prefill_urls: None,
             decode_urls: None,
@@ -141,7 +145,8 @@ impl Router {
         verbose=false,
         log_dir=None,
         prometheus_port=None,
-        prometheus_host=None
+        prometheus_host=None,
+        request_timeout_secs=600
     ))]
     fn new_pd(
         _cls: &Bound<'_, PyType>,
@@ -161,6 +166,7 @@ impl Router {
         log_dir: Option<String>,
         prometheus_port: Option<u16>,
         prometheus_host: Option<String>,
+        request_timeout_secs: u64,
     ) -> PyResult<Self> {
         use crate::pd_types::PDSelectionPolicy;
 
@@ -201,6 +207,7 @@ impl Router {
             service_discovery_namespace: None,
             prometheus_port,
             prometheus_host,
+            request_timeout_secs,
             // Store PD-specific config in a way we can access it
             prefill_urls: Some(prefill_urls),
             decode_urls: Some(decode_urls),
@@ -288,6 +295,7 @@ impl Router {
                 log_dir: self.log_dir.clone(),
                 service_discovery_config,
                 prometheus_config,
+                request_timeout_secs: self.request_timeout_secs,
             })
             .await
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;

@@ -94,13 +94,24 @@ pub trait Bootstrap: Send + Sync {
             self.set_bootstrap_info(
                 BootstrapHost::Batch(vec![prefill_info.get_hostname(); batch_size]),
                 BootstrapPort::Batch(vec![prefill_info.bootstrap_port; batch_size]),
-                BootstrapRoom::Batch((0..batch_size).map(|_| rand::random::<u64>()).collect()),
+                // Use high-quality random numbers to minimize collision risk
+                BootstrapRoom::Batch((0..batch_size).map(|_| {
+                    // Combine multiple sources of randomness for better distribution
+                    let r1 = rand::random::<u64>();
+                    let r2 = rand::random::<u64>();
+                    r1.wrapping_add(r2.rotate_left(32))
+                }).collect()),
             );
         } else {
             self.set_bootstrap_info(
                 BootstrapHost::Single(prefill_info.get_hostname()),
                 BootstrapPort::Single(prefill_info.bootstrap_port),
-                BootstrapRoom::Single(rand::random::<u64>()),
+                BootstrapRoom::Single({
+                    // Use high-quality random number for single requests too
+                    let r1 = rand::random::<u64>();
+                    let r2 = rand::random::<u64>();
+                    r1.wrapping_add(r2.rotate_left(32))
+                }),
             );
         }
         Ok(())
@@ -127,12 +138,35 @@ impl GenerateReqInput {
         if self.text.is_some() && self.input_ids.is_some() {
             return Err("Both text and input_ids are present in the request".to_string());
         }
+        
+        // Check text batch
         if let Some(InputText::Batch(texts)) = &self.text {
+            if texts.is_empty() {
+                return Err("Batch text array is empty".to_string());
+            }
+            if texts.len() > 10000 {  // Reasonable limit for production
+                return Err(format!("Batch size {} exceeds maximum allowed (10000)", texts.len()));
+            }
             return Ok(Some(texts.len()));
         }
+        
+        // Check input_ids batch
         if let Some(InputIds::Batch(ids)) = &self.input_ids {
+            if ids.is_empty() {
+                return Err("Batch input_ids array is empty".to_string());
+            }
+            if ids.len() > 10000 {  // Reasonable limit for production
+                return Err(format!("Batch size {} exceeds maximum allowed (10000)", ids.len()));
+            }
+            // Validate each sequence is not empty
+            for (i, seq) in ids.iter().enumerate() {
+                if seq.is_empty() {
+                    return Err(format!("Input sequence at index {} is empty", i));
+                }
+            }
             return Ok(Some(ids.len()));
         }
+        
         Ok(None)
     }
 }
