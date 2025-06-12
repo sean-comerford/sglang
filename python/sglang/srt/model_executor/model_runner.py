@@ -877,6 +877,7 @@ class ModelRunner:
                 layer_num=self.num_effective_layers,
                 device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
+                tp_size=self.tp_size,
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
             )
