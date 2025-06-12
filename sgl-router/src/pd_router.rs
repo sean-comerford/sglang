@@ -48,7 +48,7 @@ impl PDRouter {
 
         let decode_workers: Vec<EngineInfo> = decode_urls
             .into_iter()
-            .map(|url| EngineInfo::new_decode(url))
+            .map(EngineInfo::new_decode)
             .collect();
 
         // Wait for PD workers to be healthy
@@ -74,7 +74,7 @@ impl PDRouter {
                 let tree = Arc::new(Mutex::new(Tree::new()));
                 // Initialize tree with prefill workers
                 for engine in &prefill_workers {
-                    tree.lock().unwrap().insert(&"".to_string(), &engine.url);
+                    tree.lock().unwrap().insert("", &engine.url);
                 }
                 Some(tree)
             }
@@ -263,9 +263,9 @@ impl PDRouter {
         }
 
         // Build requests using .json() method
-        let mut prefill_request = client.post(&prefill.api_path(route)).json(&json_request);
+        let mut prefill_request = client.post(prefill.api_path(route)).json(&json_request);
 
-        let mut decode_request = client.post(&decode.api_path(route)).json(&json_request);
+        let mut decode_request = client.post(decode.api_path(route)).json(&json_request);
 
         // Copy headers from original request
         for (name, value) in crate::router::copy_request_headers(req) {
@@ -664,7 +664,7 @@ fn get_two_random_indices(len: usize) -> (usize, usize) {
 }
 
 async fn get_worker_load(client: &reqwest::Client, worker_url: &str) -> Option<isize> {
-    match client.get(&format!("{}/get_load", worker_url)).send().await {
+    match client.get(format!("{}/get_load", worker_url)).send().await {
         Ok(res) if res.status().is_success() => match res.bytes().await {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(data) => data
@@ -748,9 +748,18 @@ impl PDRouter {
         let mut all_internal_states = Vec::new();
         let mut decode_infos = Vec::new();
 
-        for worker in self.decode_workers.read().unwrap().iter() {
+        // Clone URLs to avoid holding lock across await
+        let worker_urls: Vec<String> = self
+            .decode_workers
+            .read()
+            .unwrap()
+            .iter()
+            .map(|w| w.url.clone())
+            .collect();
+
+        for worker_url in worker_urls {
             match client
-                .get(&format!("{}/get_server_info", worker.url))
+                .get(format!("{}/get_server_info", worker_url))
                 .send()
                 .await
             {
@@ -793,35 +802,38 @@ impl PDRouter {
     }
 
     pub async fn get_models(&self, client: &reqwest::Client, req: &HttpRequest) -> HttpResponse {
-        if let Ok(workers) = self.prefill_workers.read() {
-            if let Some(first_worker) = workers.first() {
-                // Send request directly without going through Router
-                let mut request_builder = client.get(format!("{}/v1/models", first_worker.url));
-                for (name, value) in crate::router::copy_request_headers(req) {
-                    if name.to_lowercase() != "content-type"
-                        && name.to_lowercase() != "content-length"
-                    {
-                        request_builder = request_builder.header(&name, &value);
+        // Get first prefill worker URL to avoid holding lock across await
+        let first_worker_url = if let Ok(workers) = self.prefill_workers.read() {
+            workers.first().map(|w| w.url.clone())
+        } else {
+            return HttpResponse::InternalServerError().body("Failed to access prefill workers");
+        };
+
+        if let Some(worker_url) = first_worker_url {
+            // Send request directly without going through Router
+            let mut request_builder = client.get(format!("{}/v1/models", worker_url));
+            for (name, value) in crate::router::copy_request_headers(req) {
+                if name.to_lowercase() != "content-type"
+                    && name.to_lowercase() != "content-length"
+                {
+                    request_builder = request_builder.header(name, value);
+                }
+            }
+            match request_builder.send().await {
+                Ok(res) => {
+                    let status = actix_web::http::StatusCode::from_u16(res.status().as_u16())
+                        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                    match res.bytes().await {
+                        Ok(body) => HttpResponse::build(status).body(body.to_vec()),
+                        Err(e) => HttpResponse::InternalServerError()
+                            .body(format!("Failed to read response body: {}", e)),
                     }
                 }
-                match request_builder.send().await {
-                    Ok(res) => {
-                        let status = actix_web::http::StatusCode::from_u16(res.status().as_u16())
-                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                        match res.bytes().await {
-                            Ok(body) => HttpResponse::build(status).body(body.to_vec()),
-                            Err(e) => HttpResponse::InternalServerError()
-                                .body(format!("Failed to read response body: {}", e)),
-                        }
-                    }
-                    Err(e) => HttpResponse::InternalServerError()
-                        .body(format!("Failed to send request: {}", e)),
-                }
-            } else {
-                HttpResponse::ServiceUnavailable().body("No prefill servers available")
+                Err(e) => HttpResponse::InternalServerError()
+                    .body(format!("Failed to send request: {}", e)),
             }
         } else {
-            HttpResponse::InternalServerError().body("Failed to access prefill workers")
+            HttpResponse::ServiceUnavailable().body("No prefill servers available")
         }
     }
 
@@ -872,35 +884,38 @@ impl PDRouter {
         req: &HttpRequest,
     ) -> HttpResponse {
         // Get model info from the first prefill server (matches original Rust PDLB behavior)
-        if let Ok(workers) = self.prefill_workers.read() {
-            if let Some(first_worker) = workers.first() {
-                let mut request_builder =
-                    client.get(format!("{}/get_model_info", first_worker.url));
-                for (name, value) in crate::router::copy_request_headers(req) {
-                    if name.to_lowercase() != "content-type"
-                        && name.to_lowercase() != "content-length"
-                    {
-                        request_builder = request_builder.header(&name, &value);
+        // Get first prefill worker URL to avoid holding lock across await
+        let first_worker_url = if let Ok(workers) = self.prefill_workers.read() {
+            workers.first().map(|w| w.url.clone())
+        } else {
+            return HttpResponse::InternalServerError().body("Failed to access prefill workers");
+        };
+
+        if let Some(worker_url) = first_worker_url {
+            let mut request_builder =
+                client.get(format!("{}/get_model_info", worker_url));
+            for (name, value) in crate::router::copy_request_headers(req) {
+                if name.to_lowercase() != "content-type"
+                    && name.to_lowercase() != "content-length"
+                {
+                    request_builder = request_builder.header(name, value);
+                }
+            }
+            match request_builder.send().await {
+                Ok(res) => {
+                    let status = actix_web::http::StatusCode::from_u16(res.status().as_u16())
+                        .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                    match res.bytes().await {
+                        Ok(body) => HttpResponse::build(status).body(body.to_vec()),
+                        Err(e) => HttpResponse::InternalServerError()
+                            .body(format!("Failed to read response body: {}", e)),
                     }
                 }
-                match request_builder.send().await {
-                    Ok(res) => {
-                        let status = actix_web::http::StatusCode::from_u16(res.status().as_u16())
-                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                        match res.bytes().await {
-                            Ok(body) => HttpResponse::build(status).body(body.to_vec()),
-                            Err(e) => HttpResponse::InternalServerError()
-                                .body(format!("Failed to read response body: {}", e)),
-                        }
-                    }
-                    Err(e) => HttpResponse::InternalServerError()
-                        .body(format!("Failed to send request: {}", e)),
-                }
-            } else {
-                HttpResponse::ServiceUnavailable().body("No prefill servers available")
+                Err(e) => HttpResponse::InternalServerError()
+                    .body(format!("Failed to send request: {}", e)),
             }
         } else {
-            HttpResponse::InternalServerError().body("Failed to access prefill workers")
+            HttpResponse::ServiceUnavailable().body("No prefill servers available")
         }
     }
 
