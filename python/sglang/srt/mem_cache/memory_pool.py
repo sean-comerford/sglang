@@ -68,6 +68,26 @@ if not kv_logger.handlers:
     kv_logger.addHandler(kv_handler)
 
     print(f"[kv_logger] Logging to: {log_path}")
+
+
+debug_logger = logging.getLogger("debug_logger")
+debug_logger.setLevel(logging.DEBUG)
+debug_logger.propagate = False
+
+if not debug_logger.handlers:
+    runtime_id = os.getenv("RUNTIME_ID")
+    if runtime_id is None:
+        raise RuntimeError("runtime_id is not set")
+
+    debug_log_filename = f"debug_log_{runtime_id}.log"
+    debug_log_path = os.path.abspath(debug_log_filename)
+
+    debug_handler = logging.FileHandler(debug_log_path)
+    debug_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    debug_logger.addHandler(debug_handler)
+
+    print(f"[debug_logger] Logging to: {debug_log_path}")
+
     
     
 GB = 1024 * 1024 * 1024
@@ -281,6 +301,7 @@ class MHATokenToKVPool(KVCache):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
     ):
+        print(f"[DEBUG] MHATokenToKVPool has been initialised with size: {size}, page_size: {page_size}, dtype: {dtype}, head_num: {head_num}, head_dim: {head_dim}, layer_num: {layer_num}, device: {device}, tp_size: {tp_size}")
         self.size = size
         self.page_size = page_size
 
