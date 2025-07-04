@@ -18,6 +18,8 @@ import KVUtil
 import ctypes
 from collections import deque
 import time
+import csv
+import threading
 """
 Memory pool.
 
@@ -54,6 +56,58 @@ kv_logger.setLevel(logging.INFO)
 
 kv_logger.propagate = False
 
+background_sync_csv_lock = threading.Lock()
+mem_free_csv_lock = threading.Lock()
+write_csv_lock = threading.Lock()
+read_csv_lock = threading.Lock()
+
+MEMORY_LOCATION = "remote"  # Set to "local" or "remote" depending on where you want to allocate memory, set to "original" for original SGLang system.
+INPUT_LEN = 512
+OUTPUT_LEN = 512
+
+def write_config_to_file():
+    """Write configuration values to a text file for other scripts to read."""
+    config_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access/config.txt"
+    
+    # Ensure directory exists
+    os.makedirs("/home/sean/diss/virtualize_llm/experiment_results/peer_access", exist_ok=True)
+    
+    with open(config_path, 'w') as f:
+        f.write(f"MEMORY_LOCATION={MEMORY_LOCATION}\n")
+        f.write(f"INPUT_LEN={INPUT_LEN}\n")
+        f.write(f"OUTPUT_LEN={OUTPUT_LEN}\n")
+    
+    print(f"[Config] Wrote configuration to {config_path}")
+
+# Call this function after the constants are defined
+write_config_to_file()
+
+
+# Initialising csv files
+def initialize_csv_files():
+    """Initialize CSV files with headers if they don't exist."""
+    # Use absolute path to avoid permission/path issues
+    base_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access"
+    
+    csv_files = {
+        #f"{base_path}/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
+        f"{base_path}/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "Layer ID"],
+        f"{base_path}/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
+        f"{base_path}/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "num_tokens", "layer_id", "latency_us"],
+        f"{base_path}/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "layer_id", "latency_us"]
+    }
+    
+    # Create the directory structure if it doesn't exist
+    os.makedirs(base_path, exist_ok=True)
+    
+    for csv_file, headers in csv_files.items():
+        if not os.path.exists(csv_file):
+            with open(csv_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+            print(f"[CSV Init] Created {csv_file} with headers: {headers}")
+
+initialize_csv_files()
 
 if not kv_logger.handlers:
     runtime_id = os.getenv("RUNTIME_ID")
@@ -68,27 +122,6 @@ if not kv_logger.handlers:
     kv_logger.addHandler(kv_handler)
 
     print(f"[kv_logger] Logging to: {log_path}")
-
-
-debug_logger = logging.getLogger("debug_logger")
-debug_logger.setLevel(logging.DEBUG)
-debug_logger.propagate = False
-
-if not debug_logger.handlers:
-    runtime_id = os.getenv("RUNTIME_ID")
-    if runtime_id is None:
-        raise RuntimeError("runtime_id is not set")
-
-    debug_log_filename = f"debug_log_{runtime_id}.log"
-    debug_log_path = os.path.abspath(debug_log_filename)
-
-    debug_handler = logging.FileHandler(debug_log_path)
-    debug_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    debug_logger.addHandler(debug_handler)
-
-    print(f"[debug_logger] Logging to: {debug_log_path}")
-
-    
     
 GB = 1024 * 1024 * 1024
 MB = 1024 * 1024
@@ -219,12 +252,16 @@ class TokenToKVPoolAllocator:
 
     def get_kvcache(self):
         return self._kvcache
-    
+    # Allocates space for tokens in the virtual address space
+    # need_size is the number of new tokens that need to be allocated space in the virtual KV cache
     def alloc(self, need_size: int):
+        # free_slots is a list of token indices in the virtual address space that are free for allocation
         if need_size > len(self.free_slots) or self.not_available:
+            # 
             return None
         
         start_time = time.perf_counter()
+        # Select the first need_size indices from free_slots (i.e. from the free_slots in virtual memory)
         select_index = self.free_slots[:need_size]
         self.free_slots = self.free_slots[need_size:]
         
@@ -250,20 +287,22 @@ class TokenToKVPoolAllocator:
             return
 
         if self.is_not_in_free_group:
-            start_time = time.perf_counter()
             self.free_slots = torch.cat((self.free_slots, free_index))
                 
             if isinstance(free_index, torch.Tensor):
                 indices = free_index.cpu().tolist()
             else:
                 indices = list(free_index)
-                
+            
+            start_time_free = time.perf_counter()
             self._kvcache.kv_pool.mem_free(indices, self.token_size, self._kvcache.layer_num, self.distance_layer)
-            end_time = time.perf_counter()
-            elapsed_us = (end_time - start_time) * 1e6
-            # kv_logger.info(
-            #     f"free took {elapsed_us:.2f} µs"
-            # )
+            end_time_free = time.perf_counter()
+            elapsed_us = (end_time_free - start_time_free) * 1e6
+            with mem_free_csv_lock:
+                with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(["mem_free", elapsed_us, len(indices), self._kvcache.layer_num])
+            
             self.log_allocated_size()
         else: # tensor
             self.free_group.append(free_index)
@@ -301,6 +340,21 @@ class MHATokenToKVPool(KVCache):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
     ):
+        
+        # Add batch write tracking variables
+        self.batch_write_start_time = None
+        self.batch_write_total_time = 0
+        self.batch_layers_written = 0
+        self.batch_tokens_count = 0
+        self.batch_write_lock = threading.Lock()
+        
+        # Add batch read tracking variables
+        self.batch_read_start_time = None
+        self.batch_read_total_time = 0
+        self.batch_layers_read = 0
+        self.batch_read_tokens_count = 0
+        self.batch_read_lock = threading.Lock()
+        
         print(f"[DEBUG] MHATokenToKVPool has been initialised with size: {size}, page_size: {page_size}, dtype: {dtype}, head_num: {head_num}, head_dim: {head_dim}, layer_num: {layer_num}, device: {device}, tp_size: {tp_size}")
         self.size = size
         self.page_size = page_size
@@ -343,7 +397,8 @@ class MHATokenToKVPool(KVCache):
         self.alloc_job_queue = queue.Queue()
         self.alloc_thread = threading.Thread(target=self._alloc_worker_loop)
         self.alloc_thread.start()
-        # self.alloc_lock = threading.Lock()
+        self.alloc_lock = threading.Lock()
+
 
     def close(self):
         self.stop_event.set()
@@ -351,8 +406,10 @@ class MHATokenToKVPool(KVCache):
         self.alloc_thread.join()
            
     def _alloc_worker_loop(self):
+        # Keep looping until an external signal (stop event) is triggered. 
         while not self.stop_event.is_set():
             try:
+                # Monitor a queue for token indices that need to be accessed soon
                 select_index = self.alloc_job_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
@@ -363,8 +420,17 @@ class MHATokenToKVPool(KVCache):
                     select_index_cpu = select_index_cpu.tolist()
                 else:
                     select_index_cpu =  select_index
-        
+                #start_time_prep = time.perf_counter()
                 self.kv_pool.prepare_access(select_index_cpu, self.token_size, self.layer_num, self.distance_layer, 1)
+                # end_time_prep = time.perf_counter()
+                # elapsed_us_prep = (end_time_prep - start_time_prep) * 1e6
+                # num_tokens = len(select_index_cpu)
+                # with prepare_access_csv_lock:
+                #      with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                #         writer = csv.writer(csv_file)
+                #         writer.writerow(["prepare_access", elapsed_us_prep, num_tokens, self.layer_num])
+                        
+                
 
             finally:
                 self.alloc_job_queue.task_done()
@@ -454,14 +520,36 @@ class MHATokenToKVPool(KVCache):
         return value_tensor
 
     def get_kv_buffer(self, layer_id: int):
-        
+        with self.batch_read_lock:
+            # Initialize batch tracking on first layer
+            if layer_id == 0:
+                self.batch_read_start_time = time.perf_counter()
+                self.batch_read_total_time = 0
+                self.batch_layers_read = 0
+
         start_time = time.perf_counter()
         ret = self.get_key_buffer(layer_id), self.get_value_buffer(layer_id)
         end_time = time.perf_counter()
         elapsed_us = (end_time - start_time) * 1e6
-        # kv_logger.info(
-        #     f"get() took {elapsed_us:.2f} µs"
-        # )
+        
+        with self.batch_read_lock:
+            self.batch_read_total_time += elapsed_us
+            self.batch_layers_read += 1
+            
+            # If this is the last layer, record the total read time
+            if self.batch_layers_read == self.layer_num:
+                with read_csv_lock:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                        writer = csv.writer(csv_file)
+                        # Write in this format: Operation,Layer ID, Latency across all layers.
+                        writer.writerow(["read_kv_all_layers", layer_id, self.batch_read_total_time])
+                        
+                
+                # Reset for next batch
+                self.batch_read_start_time = None
+                self.batch_read_total_time = 0
+                self.batch_layers_read = 0
+                
         return ret
 
     def set_kv_buffer(
@@ -477,7 +565,6 @@ class MHATokenToKVPool(KVCache):
     
         layer_index = layer_id * (self.size + self.page_size) * self.head_num * self.head_dim
         token_size = self.head_num * self.head_dim
-        start_time = time.perf_counter()
         # print("===== write_kv DEBUG START =====")
         # print(f"layer_index: {layer_index}")
         # print(f"loc shape: {loc.shape}, indices.min: {loc.min()}, max: {loc.max()}")
@@ -493,15 +580,57 @@ class MHATokenToKVPool(KVCache):
         # print(f"k_buffer_pt (hex): {hex(ptr_val)}")
         # print("===== write_kv DEBUG END =====")
         
+        # Blocks main thread until the alloc_job_queue is empty
+        # Waits for all prepare_access calls in the background thread queue to finish before proceeding
+        # set_kv_buffer happens during token generation, so this latency directly affects the time users wait for tokens
+        join_start = time.perf_counter()
         self.alloc_job_queue.join() # waits for all queued work so far
+        join_end = time.perf_counter()
+        join_elapsed_us = (join_end - join_start) * 1e6
+        
+        with self.batch_write_lock:
+            # Initialize batch tracking on first layer
+            if layer_id == 0:
+                self.batch_write_start_time = time.perf_counter()
+                self.batch_write_total_time = 0
+                self.batch_layers_written = 0
+                self.batch_tokens_count = len(loc)
+                # Initialize background sync tracking
+                self.batch_sync_total_time = 0
 
+            # Accumulate background sync time
+            self.batch_sync_total_time += join_elapsed_us
+
+        start_time_write = time.perf_counter()
         self.kv_pool.write_kv(layer_index, loc, cache_k, token_size, self.store_dtype, 1) # k
         self.kv_pool.write_kv(layer_index, loc, cache_v, token_size, self.store_dtype, 0) # v
-        end_time = time.perf_counter()
-        elapsed_us = (end_time - start_time) * 1e6
-        # kv_logger.info(
-        #     f"set() took {elapsed_us:.2f} µs"
-        # )
+        end_time_write = time.perf_counter()
+        elapsed_us = (end_time_write - start_time_write) * 1e6
+        
+        with self.batch_write_lock:
+            self.batch_write_total_time += elapsed_us
+            self.batch_layers_written += 1
+            
+            # If this is the last layer, record both write time AND background sync time
+            if self.batch_layers_written == self.layer_num:
+                # Log total write time across all layers
+                with write_csv_lock:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                        writer = csv.writer(csv_file)
+                        writer.writerow(["write_kv_all_layers", self.batch_tokens_count, layer_id, self.batch_write_total_time])
+                
+                # Log accumulated background synchronization time across all layers
+                with background_sync_csv_lock:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                        writer = csv.writer(csv_file)
+                        writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
+                
+                # Reset for next batch
+                self.batch_write_start_time = None
+                self.batch_write_total_time = 0
+                self.batch_layers_written = 0
+                self.batch_tokens_count = 0
+                self.batch_sync_total_time = 0
 
 @torch.compile 
 def fused_downcast(
@@ -612,7 +741,8 @@ class MLATokenToKVPool(KVCache):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
-    ):
+    ):      
+        
         self.size = size
         self.page_size = page_size
         self.dtype = dtype
