@@ -61,38 +61,63 @@ mem_free_csv_lock = threading.Lock()
 write_csv_lock = threading.Lock()
 read_csv_lock = threading.Lock()
 
-MEMORY_LOCATION = "remote"  # Set to "local" or "remote" depending on where you want to allocate memory, set to "original" for original SGLang system.
-INPUT_LEN = 512
-OUTPUT_LEN = 512
-
-def write_config_to_file():
-    """Write configuration values to a text file for other scripts to read."""
+def read_config_from_file():
+    """Read configuration values from config.txt file."""
     config_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access/config.txt"
     
-    # Ensure directory exists
-    os.makedirs("/home/sean/diss/virtualize_llm/experiment_results/peer_access", exist_ok=True)
+    # Default values in case file doesn't exist or values are missing
+    defaults = {
+        "MEMORY_LOCATION": "local",
+        "INPUT_LEN": "128", 
+        "OUTPUT_LEN": "128",
+        "BATCH_SIZE": "64"
+    }
     
-    with open(config_path, 'w') as f:
-        f.write(f"MEMORY_LOCATION={MEMORY_LOCATION}\n")
-        f.write(f"INPUT_LEN={INPUT_LEN}\n")
-        f.write(f"OUTPUT_LEN={OUTPUT_LEN}\n")
+    config = defaults.copy()
     
-    print(f"[Config] Wrote configuration to {config_path}")
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                        key, value = line.split('=', 1)
+                        config[key.strip()] = value.strip()
+            print(f"[Config] Successfully read configuration from {config_path}")
+        else:
+            print(f"[Config] Config file not found at {config_path}, using defaults")
+            # Ensure directory exists and create the file with defaults
+            os.makedirs("/home/sean/diss/virtualize_llm/experiment_results/peer_access", exist_ok=True)
+            with open(config_path, 'w') as f:
+                for key, value in defaults.items():
+                    f.write(f"{key}={value}\n")
+            print(f"[Config] Created default config file at {config_path}")
+            
+    except Exception as e:
+        print(f"[Config] Error reading config file: {e}, using defaults")
+    
+    return config
 
-# Call this function after the constants are defined
-write_config_to_file()
+# Read configuration from file
+config = read_config_from_file()
+MEMORY_LOCATION = config["MEMORY_LOCATION"]
+INPUT_LEN = int(config["INPUT_LEN"])
+OUTPUT_LEN = int(config["OUTPUT_LEN"])
+BATCH_SIZE = int(config["BATCH_SIZE"])
+
+print(f"[Config] Using configuration: MEMORY_LOCATION={MEMORY_LOCATION}, INPUT_LEN={INPUT_LEN}, OUTPUT_LEN={OUTPUT_LEN}, BATCH_SIZE={BATCH_SIZE}")
 
 
 # Initialising csv files
 def initialize_csv_files():
     """Initialize CSV files with headers if they don't exist."""
     # Use absolute path to avoid permission/path issues
-    base_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access"
+    base_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access/" + f"{BATCH_SIZE}_batch_size/data"
     
     csv_files = {
         #f"{base_path}/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
         f"{base_path}/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "Layer ID"],
-        f"{base_path}/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
+        # f"{base_path}/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
         f"{base_path}/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "num_tokens", "layer_id", "latency_us"],
         f"{base_path}/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "layer_id", "latency_us"]
     }
@@ -294,14 +319,14 @@ class TokenToKVPoolAllocator:
             else:
                 indices = list(free_index)
             
-            start_time_free = time.perf_counter()
+            #start_time_free = time.perf_counter()
             self._kvcache.kv_pool.mem_free(indices, self.token_size, self._kvcache.layer_num, self.distance_layer)
-            end_time_free = time.perf_counter()
-            elapsed_us = (end_time_free - start_time_free) * 1e6
-            with mem_free_csv_lock:
-                with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
-                    writer = csv.writer(csv_file)
-                    writer.writerow(["mem_free", elapsed_us, len(indices), self._kvcache.layer_num])
+            #end_time_free = time.perf_counter()
+            #elapsed_us = (end_time_free - start_time_free) * 1e6
+            # with mem_free_csv_lock:
+            #     with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+            #         writer = csv.writer(csv_file)
+            #         writer.writerow(["mem_free", elapsed_us, len(indices), self._kvcache.layer_num])
             
             self.log_allocated_size()
         else: # tensor
@@ -539,7 +564,7 @@ class MHATokenToKVPool(KVCache):
             # If this is the last layer, record the total read time
             if self.batch_layers_read == self.layer_num:
                 with read_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
                         # Write in this format: Operation,Layer ID, Latency across all layers.
                         writer.writerow(["read_kv_all_layers", layer_id, self.batch_read_total_time])
@@ -615,13 +640,13 @@ class MHATokenToKVPool(KVCache):
             if self.batch_layers_written == self.layer_num:
                 # Log total write time across all layers
                 with write_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
                         writer.writerow(["write_kv_all_layers", self.batch_tokens_count, layer_id, self.batch_write_total_time])
                 
                 # Log accumulated background synchronization time across all layers
                 with background_sync_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
                         writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
                 
