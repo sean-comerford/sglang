@@ -47,6 +47,7 @@ import queue
 
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.utils import debug_timing, get_compiler_backend
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ background_sync_csv_lock = threading.Lock()
 mem_free_csv_lock = threading.Lock()
 write_csv_lock = threading.Lock()
 read_csv_lock = threading.Lock()
+prepare_access_csv_lock = threading.Lock()
 
 def read_config_from_file():
     """Read configuration values from config.txt file."""
@@ -115,10 +117,10 @@ def initialize_csv_files():
     base_path = "/home/sean/diss/virtualize_llm/experiment_results/peer_access/" + f"{BATCH_SIZE}_batch_size/data"
     
     csv_files = {
-        #f"{base_path}/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
-        f"{base_path}/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "Layer ID"],
+        f"{base_path}/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers", "Request ID"],
+        f"{base_path}/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "Layer ID", "Request ID"],
         # f"{base_path}/mem_free_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "latency_us", "num_tokens", "num_layers"],
-        f"{base_path}/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "num_tokens", "layer_id", "latency_us"],
+        f"{base_path}/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "num_tokens", "layer_id", "latency_us", "Request ID"],
         f"{base_path}/read_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv": ["operation", "layer_id", "latency_us"]
     }
     
@@ -259,6 +261,10 @@ class TokenToKVPoolAllocator:
         self.clear()
         self.token_size = self._kvcache.head_num * self._kvcache.head_dim
         self.distance_layer = self._kvcache.head_num * self._kvcache.head_dim * (self.size + self.page_size)
+        self.current_request_id = 0
+        self.accumulated_latency = 0.0
+        self.first_request = True
+        self.prev_num_tokens = None
       
     def shutdown(self):
         self._kvcache.close()
@@ -279,25 +285,61 @@ class TokenToKVPoolAllocator:
         return self._kvcache
     # Allocates space for tokens in the virtual address space
     # need_size is the number of new tokens that need to be allocated space in the virtual KV cache
-    def alloc(self, need_size: int):
-        # free_slots is a list of token indices in the virtual address space that are free for allocation
-        if need_size > len(self.free_slots) or self.not_available:
-            # 
-            return None
+    # def alloc(self, need_size: int):
+    #     # free_slots is a list of token indices in the virtual address space that are free for allocation
+    #     if need_size > len(self.free_slots) or self.not_available:
+    #         # 
+    #         return None
         
-        start_time = time.perf_counter()
-        # Select the first need_size indices from free_slots (i.e. from the free_slots in virtual memory)
+    #     start_time = time.perf_counter()
+    #     # Select the first need_size indices from free_slots (i.e. from the free_slots in virtual memory)
+    #     select_index = self.free_slots[:need_size]
+    #     self.free_slots = self.free_slots[need_size:]
+        
+    #     self._kvcache.alloc_job_queue.put(select_index)
+        
+    #     end_time = time.perf_counter()
+    #     elapsed_us = (end_time - start_time) * 1e6
+    #     # kv_logger.info(
+    #     #     f"alloc1 took {elapsed_us:.2f} µs"
+    #     # )
+    #     self.log_allocated_size()
+
+    #     return select_index
+    
+    def alloc(self, need_size: int):
+        prefill_sizes = {64, 128, 256, 512}
+        if need_size > len(self.free_slots) or self.not_available:
+            return None
+
         select_index = self.free_slots[:need_size]
         self.free_slots = self.free_slots[need_size:]
-        
-        self._kvcache.alloc_job_queue.put(select_index)
-        
-        end_time = time.perf_counter()
-        elapsed_us = (end_time - start_time) * 1e6
-        # kv_logger.info(
-        #     f"alloc1 took {elapsed_us:.2f} µs"
-        # )
-        self.log_allocated_size()
+
+        if isinstance(select_index, torch.Tensor):
+            select_index_cpu = select_index.cpu().tolist()
+        else:
+            select_index_cpu = select_index
+        num_tokens = len(select_index_cpu)
+
+        start_time_prep = time.perf_counter()
+        self._kvcache.kv_pool.prepare_access(select_index_cpu, self.token_size, self._kvcache.layer_num, self.distance_layer, 0)
+        end_time_prep = time.perf_counter()
+        elapsed_us_prep = (end_time_prep - start_time_prep) * 1e6
+
+        if num_tokens in prefill_sizes:
+            if not self.first_request:
+                with prepare_access_csv_lock:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+                        writer = csv.writer(csv_file)
+                        writer.writerow(["prepare_access", self.accumulated_latency, self.prev_num_tokens, self.current_request_id])
+            else:
+                self.first_request = False
+
+            self.current_request_id += 1
+            self.accumulated_latency = elapsed_us_prep
+            self.prev_num_tokens = num_tokens
+        else:
+            self.accumulated_latency += elapsed_us_prep
 
         return select_index
 
@@ -372,6 +414,7 @@ class MHATokenToKVPool(KVCache):
         self.batch_layers_written = 0
         self.batch_tokens_count = 0
         self.batch_write_lock = threading.Lock()
+        self.current_request_id = 0
         
         # Add batch read tracking variables
         self.batch_read_start_time = None
@@ -419,46 +462,74 @@ class MHATokenToKVPool(KVCache):
         )
 
         self.stop_event = threading.Event()
-        self.alloc_job_queue = queue.Queue()
-        self.alloc_thread = threading.Thread(target=self._alloc_worker_loop)
-        self.alloc_thread.start()
-        self.alloc_lock = threading.Lock()
+        # Create a job queue for the background thread to monitor
+        # These jobs are token indices that are about to be written to or read from.
+        # So the background thread will back these token indices with physical memory in prepare access.
+        #self.alloc_job_queue = queue.Queue()
+        #self.alloc_thread = threading.Thread(target=self._alloc_worker_loop)
+        #self.alloc_thread.start()
+        #self.alloc_lock = threading.Lock()
 
 
-    def close(self):
-        self.stop_event.set()
-        self.alloc_job_queue.join()
-        self.alloc_thread.join()
+    # def close(self):
+    #     self.stop_event.set()
+    #     self.alloc_job_queue.join()
+    #     self.alloc_thread.join()
            
-    def _alloc_worker_loop(self):
-        # Keep looping until an external signal (stop event) is triggered. 
-        while not self.stop_event.is_set():
-            try:
-                # Monitor a queue for token indices that need to be accessed soon
-                select_index = self.alloc_job_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            
-            try:
-                if isinstance(select_index, torch.Tensor):
-                    select_index_cpu = select_index.cpu()
-                    select_index_cpu = select_index_cpu.tolist()
-                else:
-                    select_index_cpu =  select_index
-                #start_time_prep = time.perf_counter()
-                self.kv_pool.prepare_access(select_index_cpu, self.token_size, self.layer_num, self.distance_layer, 1)
-                # end_time_prep = time.perf_counter()
-                # elapsed_us_prep = (end_time_prep - start_time_prep) * 1e6
-                # num_tokens = len(select_index_cpu)
-                # with prepare_access_csv_lock:
-                #      with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
-                #         writer = csv.writer(csv_file)
-                #         writer.writerow(["prepare_access", elapsed_us_prep, num_tokens, self.layer_num])
-                        
-                
+    # def _alloc_worker_loop(self):
+    #     # Accumulate latency per request
+    #     accumulated_latency = 0.0
+    #     current_request_id = 0
+    #     first_request = True
+    #     # Token sizes that indicate a new request
+    #     prefill_sizes = {64, 128, 256, 512}
 
-            finally:
-                self.alloc_job_queue.task_done()
+    #     while not self.stop_event.is_set():
+    #         try:
+    #             select_index = self.alloc_job_queue.get(timeout=0.1)
+    #         except queue.Empty:
+    #             continue
+
+    #         try:
+    #             if isinstance(select_index, torch.Tensor):
+    #                 select_index_cpu = select_index.cpu().tolist()
+    #             else:
+    #                 select_index_cpu = select_index
+    #             num_tokens = len(select_index_cpu)
+
+    #             start_time_prep = time.perf_counter()
+    #             self.kv_pool.prepare_access(select_index_cpu, self.token_size, self.layer_num, self.distance_layer, 1)
+    #             end_time_prep = time.perf_counter()
+    #             elapsed_us_prep = (end_time_prep - start_time_prep) * 1e6
+
+    #             # If this is a prefill (start of a new request)
+    #             if num_tokens in prefill_sizes:
+    #                 if not first_request:
+    #                     # Write the accumulated latency for the previous request
+    #                     with prepare_access_csv_lock:
+    #                         with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+    #                             writer = csv.writer(csv_file)
+    #                             writer.writerow(["prepare_access", accumulated_latency, prev_num_tokens, current_request_id])
+    #                 else:
+    #                     first_request = False
+
+    #                 # Start new request
+    #                 current_request_id += 1
+    #                 accumulated_latency = elapsed_us_prep
+    #                 prev_num_tokens = num_tokens
+    #             else:
+    #                 # Accumulate latency for current request
+    #                 accumulated_latency += elapsed_us_prep
+
+    #         finally:
+    #             self.alloc_job_queue.task_done()
+
+    #     # On shutdown, flush the last request's accumulated latency
+    #     if not first_request:
+    #         with prepare_access_csv_lock:
+    #             with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/prepare_access_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
+    #                 writer = csv.writer(csv_file)
+    #                 writer.writerow(["prepare_access", accumulated_latency, prev_num_tokens, current_request_id])
                 
                 
     def _create_buffers(self):
@@ -586,6 +657,7 @@ class MHATokenToKVPool(KVCache):
         k_scale: Optional[float] = None,
         v_scale: Optional[float] = None,
     ):
+        
         layer_id = layer.layer_id
     
         layer_index = layer_id * (self.size + self.page_size) * self.head_num * self.head_dim
@@ -609,7 +681,7 @@ class MHATokenToKVPool(KVCache):
         # Waits for all prepare_access calls in the background thread queue to finish before proceeding
         # set_kv_buffer happens during token generation, so this latency directly affects the time users wait for tokens
         join_start = time.perf_counter()
-        self.alloc_job_queue.join() # waits for all queued work so far
+        #self.alloc_job_queue.join() # waits for all queued work so far
         join_end = time.perf_counter()
         join_elapsed_us = (join_end - join_start) * 1e6
         
@@ -622,13 +694,16 @@ class MHATokenToKVPool(KVCache):
                 self.batch_tokens_count = len(loc)
                 # Initialize background sync tracking
                 self.batch_sync_total_time = 0
+                
+                if self.batch_tokens_count == 128 or self.batch_tokens_count == 64 or self.batch_tokens_count == 256 or self.batch_tokens_count == 512:
+                    self.current_request_id += 1
 
             # Accumulate background sync time
             self.batch_sync_total_time += join_elapsed_us
 
         start_time_write = time.perf_counter()
-        self.kv_pool.write_kv(layer_index, loc, cache_k, token_size, self.store_dtype, 1) # k
-        self.kv_pool.write_kv(layer_index, loc, cache_v, token_size, self.store_dtype, 0) # v
+        self.kv_pool.write_kv(layer_index, loc, cache_k, token_size, self.store_dtype, 1, self.current_request_id, MEMORY_LOCATION, INPUT_LEN, OUTPUT_LEN, BATCH_SIZE, layer_id, self.layer_num) # k
+        self.kv_pool.write_kv(layer_index, loc, cache_v, token_size, self.store_dtype, 0, self.current_request_id, MEMORY_LOCATION, INPUT_LEN, OUTPUT_LEN, BATCH_SIZE, layer_id, self.layer_num) # v
         end_time_write = time.perf_counter()
         elapsed_us = (end_time_write - start_time_write) * 1e6
         
@@ -642,13 +717,13 @@ class MHATokenToKVPool(KVCache):
                 with write_csv_lock:
                     with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/write_kv_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
-                        writer.writerow(["write_kv_all_layers", self.batch_tokens_count, layer_id, self.batch_write_total_time])
+                        writer.writerow(["write_kv_all_layers", self.batch_tokens_count, layer_id, self.batch_write_total_time, self.current_request_id])
                 
                 # Log accumulated background synchronization time across all layers
                 with background_sync_csv_lock:
                     with open(f"/home/sean/diss/virtualize_llm/experiment_results/peer_access/{BATCH_SIZE}_batch_size/data/background_synchronisation_{MEMORY_LOCATION}_input_{INPUT_LEN}_output_{OUTPUT_LEN}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
-                        writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
+                        writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id, self.current_request_id])
                 
                 # Reset for next batch
                 self.batch_write_start_time = None
