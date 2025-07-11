@@ -94,6 +94,7 @@ BATCH_SIZE = config["BATCH_SIZE"]
 DURATION = config["DURATION"]
 RPS = config["RPS"]
 METHOD = config["METHOD"]
+DATASET = config["DATASET"]
 
 print(f"[Config] Using configuration: MEMORY_LOCATION={MEMORY_LOCATION}, BATCH_SIZE={BATCH_SIZE}, DURATION={DURATION}, RPS={RPS}")
 
@@ -102,7 +103,7 @@ print(f"[Config] Using configuration: MEMORY_LOCATION={MEMORY_LOCATION}, BATCH_S
 def initialize_csv_files():
     """Initialize CSV files with headers if they don't exist."""
     # Use absolute path to avoid permission/path issues
-    base_path = f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/data"
+    base_path = f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data"
     
     csv_files = {
         f"{base_path}/prepare_access_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv": ["operation", "latency_us", "num_tokens", "num_layers", "Request ID"],
@@ -319,7 +320,7 @@ class TokenToKVPoolAllocator:
 
         with prepare_access_csv_lock:
             with open(
-                f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/{BATCH_SIZE}_batch_size/data/prepare_access_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv",
+                f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/prepare_access_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv",
                 'a', newline=''
             ) as csv_file:
                 writer = csv.writer(csv_file)
@@ -624,7 +625,7 @@ class MHATokenToKVPool(KVCache):
             # If this is the last layer, record the total read time
             if self.batch_layers_read == self.layer_num:
                 with read_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/{BATCH_SIZE}_batch_size/data/read_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/read_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
                         # Write in this format: Operation,Layer ID, Latency across all layers.
                         writer.writerow(["read_kv_all_layers", layer_id, self.batch_read_total_time])
@@ -704,7 +705,7 @@ class MHATokenToKVPool(KVCache):
             if self.batch_layers_written == self.layer_num:
                 # Log total write time across all layers
                 with write_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/{BATCH_SIZE}_batch_size/data/write_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/write_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
                         writer = csv.writer(csv_file)
                         writer.writerow([
                             "write_kv_all_layers",
@@ -716,7 +717,7 @@ class MHATokenToKVPool(KVCache):
 
                 # Log accumulated background synchronization time across all layers
                 with background_sync_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/{BATCH_SIZE}_batch_size/data/background_synchronisation_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/background_synchronisation_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
                                 writer = csv.writer(csv_file)
                                 writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
                         
