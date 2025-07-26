@@ -367,6 +367,7 @@ class DefaultModelLoader(BaseModelLoader):
         device_config: DeviceConfig,
     ) -> nn.Module:
         target_device = torch.device(device_config.device)
+        print(f"[DEBUG Model loader] Loading model on device: {torch.cuda.current_device()}")
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(
@@ -1413,6 +1414,7 @@ class RemoteModelLoader(BaseModelLoader):
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
+    print(f"[DEBUG Model loader] Using model loader: {load_config.load_format}")
 
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)

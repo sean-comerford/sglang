@@ -331,6 +331,7 @@ class TokenToKVPoolAllocator:
                     self._kvcache.layer_num
                 ])
 
+        self.log_allocated_size()
         return select_index
 
 
@@ -363,7 +364,7 @@ class TokenToKVPoolAllocator:
             #         writer = csv.writer(csv_file)
             #         writer.writerow(["mem_free", elapsed_us, len(indices), self._kvcache.layer_num])
             
-            # self.log_allocated_size()
+            self.log_allocated_size()
         else: # tensor
             self.free_group.append(free_index)
      

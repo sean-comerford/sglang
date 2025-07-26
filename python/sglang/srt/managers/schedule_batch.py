@@ -563,6 +563,7 @@ class Req:
         # This is because kv is not ready in `process_prefill_chunk`.
         # We use `tmp_end_idx` to store the end index of the kv cache to send.
         self.tmp_end_idx: int = -1
+        self.tmp_end_idx: int = -1
 
     @property
     def seqlen(self):
@@ -1022,6 +1023,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
     def prepare_for_extend(self):
+    def prepare_for_extend(self):
+        # Extend refers to prefill phase
+        # Collects all requests in the batch
+        # For each request, it determines the input tokens to be processes, the number of tokens to extend and more
+        self.forward_mode = ForwardMode.EXTEND
         self.forward_mode = ForwardMode.EXTEND
 
         # Allocate req slots
@@ -1205,6 +1211,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self,
             self.model_config.vocab_size,
         )
+        # actual_size_bytes = self.extend_num_tokens * self.model_config.num_attention_heads * self.model_config.head_dim * self.model_config.num_hidden_layers * torch.tensor(0, dtype=self.model_config.dtype).element_size()
+        # Log to CSV
+        # with read_csv_lock:
+        #     with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/read_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+        #         writer = csv.writer(csv_file)
+        #         writer.writerow([
+        #             "read_kv_",
+        #             "N/A",  # Layer ID, or batch ID if you want
+        #             "N/A",  # Latency if you want to record it
+        #             actual_size_bytes
 
     def mix_with_running(self, running_batch: "ScheduleBatch"):
         self.forward_mode = ForwardMode.MIXED
@@ -1432,6 +1448,19 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.req_to_token_pool.write(
             (self.req_pool_indices, locs), self.out_cache_loc.to(torch.int32)
         )
+        
+        
+        # # --- LOGGING: Average size of read per layer (bytes) ---
+        # actual_size_bytes = bs * self.model_config.num_attention_heads * self.model_config.head_dim * self.model_config.num_hidden_layers * torch.tensor(0, dtype=self.model_config.dtype).element_size()
+        # avg_size_per_layer = actual_size_bytes / self.model_config.num_hidden_layers
+        # with read_csv_lock:
+        #     with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/read_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+        #         writer = csv.writer(csv_file)
+        #         writer.writerow([
+        #             "read_kv_actual",
+        #             "N/A",  # Layer ID or batch ID
+        #             "N/A",  # Latency if you want to record it
+        #             avg_size_per_layer
 
     def filter_batch(
         self,

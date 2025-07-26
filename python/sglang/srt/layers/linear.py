@@ -32,6 +32,8 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.utils import set_weight_attrs
 
+import KVUtil
+
 logger = logging.getLogger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -143,6 +145,7 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    # input_size_per_partition: is the number of columns of the weight matrix that this GPU stores when the full matrix has been split across GPUs for tensor-parallel inference
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -153,6 +156,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Allocate a raw tensor that will hold the layers weight matrix
+        # Get shape of layer
         weight = Parameter(
             torch.empty(
                 sum(output_partition_sizes),
@@ -161,6 +166,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        # print("[DEBUG] Weight tensor shape:", weight.shape)  # <-- Print the shape here
+        # print(f"[DEBUG] Weight tensor address on GPU is {weight.data_ptr()}")
+        size_in_bytes = weight.element_size() * weight.numel()
+        # print(f"[DEBUG] Type of size_in_bytes: {type(size_in_bytes)}")
+        # print(f"[DEBUG] Type of weight data pointer is {type(weight.data_ptr())}")
+        # Load the weights on remote GPU
+        # kvUtil = KVUtil.KVAllocator("mem_access_time")
+        # kvUtil.copy_weights(weight.data_ptr(), size_in_bytes)
+
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
