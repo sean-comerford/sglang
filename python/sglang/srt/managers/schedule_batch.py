@@ -1022,7 +1022,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-    def prepare_for_extend(self):
+
     def prepare_for_extend(self):
         # Extend refers to prefill phase
         # Collects all requests in the batch

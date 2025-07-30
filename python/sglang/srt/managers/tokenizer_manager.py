@@ -46,6 +46,8 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
+import multiprocessing as mp
+
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import (
@@ -116,6 +118,9 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
+from sglang.srt.managers.scheduler import run_migrate_scheduler_process
+from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
+
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
@@ -141,6 +146,7 @@ class ReqState:
     last_output_offset: int = 0
 
 
+
 class TokenizerManager:
     """TokenizerManager is a process that tokenizes the text."""
 
@@ -163,6 +169,12 @@ class TokenizerManager:
         self.send_to_scheduler = get_zmq_socket(
             context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
         )
+        # This one socket will receive from All schedulers, done for live migration
+        self.recv_from_scheduler = get_zmq_socket(
+            context, zmq.PULL, port_args.schedulers_to_tokenizer_ipc_name, True
+        )
+        print(f"[DEBUG tokenizer_manager.py] initialised IPC with scheduler at {port_args.scheduler_input_ipc_name}")
+        
 
         # Read model args
         self.model_path = server_args.model_path
@@ -1018,13 +1030,33 @@ class TokenizerManager:
         kill_process_tree(os.getpid(), include_parent=True)
         sys.exit(0)
 
+    #
     async def handle_loop(self):
-        """The event loop that handles requests"""
+        """The event loop that handles messages from detokenizer and scheduler."""
 
         while True:
-            recv_obj = await self.recv_from_detokenizer.recv_pyobj()
-            self._result_dispatcher(recv_obj)
-            self.last_receive_tstamp = time.time()
+            detokenizer_future = self.recv_from_detokenizer.recv_pyobj()
+            scheduler_future = self.recv_from_scheduler.recv_pyobj()
+            done, pending = await asyncio.wait(
+                [detokenizer_future, scheduler_future],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for fut in done:
+                result = fut.result()
+                # print(f"[DEBUG tokenizer_manager.py] Result from future object is: {result}")
+                # Check if result is subscriptable (e.g., dict) and has "msg"
+                if isinstance(result, dict) and result["msg"] == "migrate":
+                    # Handle what to do with migrate message here. Launch a new migration scheduler process. 
+                    print(f"[DEBUG tokenizer_manager.py] Received from scheduler: {result}")
+                    print(f"[DEBUG tokenizer_manager.py] Launching migration scheduler...")
+                    self.launch_migration_scheduler()
+                else:
+                    self._result_dispatcher(result)
+                    self.last_receive_tstamp = time.time()
+
+            for fut in pending:
+                fut.cancel()
 
     def _handle_batch_output(
         self,
@@ -1260,6 +1292,51 @@ class TokenizerManager:
             if len(self.model_update_tmp) == self.server_args.dp_size:
                 self.model_update_result.set_result(self.model_update_tmp)
 
+    def launch_migration_scheduler(self):
+        "Starts a migration scheduler process to handle live migration."
+        reader_mig, writer_mig = mp.Pipe(duplex=False)
+        gpu_id_mig = 1 # Hardcoded to migrate to GPU 1 for now
+        # Hardcode tp_rank and pp_rank to 0 for migration scheduler for now
+        tp_rank = 0
+        pp_rank = 0
+        print(f"[DEBUG tokenizer_manager.py] ------------------------------------ Launching migration scheduler process on GPU {gpu_id_mig} ------------------------------------")
+        port_args_mig = PortArgs.init_new(self.server_args)
+        print(f"[DEBUG tokenizer_manager.py] Created migration scheduler with ipc filename {port_args_mig.scheduler_input_ipc_name}")
+        
+        proc_mig = mp.Process(
+            target = run_migrate_scheduler_process,
+            args=(
+                self.server_args,
+                port_args_mig,
+                gpu_id_mig,
+                tp_rank,
+                pp_rank,
+                None,
+                writer_mig,
+            ),
+        )
+        memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=self.server_args.enable_memory_saver
+        )
+        
+        with memory_saver_adapter.configure_subprocess():
+            proc_mig.start()
+        
+        # Wait for the migration scheduler to be ready
+        try:
+            data_mig = reader_mig.recv()
+            print(f"[DEBUG tokenizer_manager.py] Tokenizer has received message from migration scheduler, it has started: {data_mig}")
+            if data_mig["status"] != "migrate_ready":
+                raise RuntimeError(
+                    "Migration scheduler initialization failed. Please see the error messages above."
+                )
+        except EOFError:
+            logger.error(
+                f"Migration scheduler is dead. Please check if there are relevant logs."
+            )
+            proc_mig.join()
+            logger.error(f"Exit code: {proc_mig.exitcode}")
+            raise
 
 async def print_exception_wrapper(func):
     """

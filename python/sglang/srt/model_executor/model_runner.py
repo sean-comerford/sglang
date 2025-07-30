@@ -121,8 +121,8 @@ class ModelRunner:
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
     ):
         # Print a trace so that I can see where this constructor function is called
-        import traceback
-        print(f"[DEBUG] ModelRunner constructor called from:\n{traceback.format_stack()}")
+        # import traceback
+        # print(f"[DEBUG] ModelRunner constructor called from:\n{traceback.format_stack()}")
         
         # Parse args
         self.model_config = model_config

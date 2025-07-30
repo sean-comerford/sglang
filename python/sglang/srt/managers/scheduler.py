@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
+import KVUtil
 
 import psutil
 import setproctitle
@@ -146,6 +147,8 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
+
+
 expert_distribution_recorder = ExpertDistributionRecorder()
 
 logger = logging.getLogger(__name__)
@@ -207,6 +210,11 @@ class Scheduler(
         self.gpu_id = gpu_id
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.page_size = server_args.page_size
+        # Migration flag
+        self.migrated = False
+        
+        # Initialise KV allocator
+        self.kv_allocator = KVUtil.KVAllocator("mem_access_time")
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
@@ -297,6 +305,7 @@ class Scheduler(
 
         # Get token and memory info from the model worker
         (
+            # max number of tokens the KV cache can hold
             self.max_total_num_tokens,
             self.max_prefill_tokens,
             self.max_running_requests,
@@ -1594,6 +1603,17 @@ class Scheduler(
             ret = EmbeddingBatchResult(
                 embeddings=embeddings, bid=model_worker_batch.bid
             )
+        if batch.forward_mode.is_decode():
+            # print(f"[DEBUG scheduler.py] Finished decoding step for a batch, decoded {len(batch.output_ids)} tokens.")
+            usage_rate = self.kv_allocator.get_usage_rate()
+            if usage_rate >= 0.7 and not self.migrated:
+                self.migrated = True
+                print(f"[DEBUG scheduler.py] KV Allocator usage rate is >= 0.7: {usage_rate:.2f}")
+                # Send message to tokenizer to migrate.
+                print(f"[DEBUG scheduler.py] Sending migration message to tokenizer.")
+                self.send_to_tokenizer.send_pyobj({"msg": "migrate"})
+                # Will probably need to define a migration.py to handle this. 
+            # print(f"[DEBUG scheduler.py] KV Allocator usage rate: {usage_rate:.2f}")
         return ret
 
     def process_batch_result(
@@ -2228,11 +2248,82 @@ def run_scheduler_process(
     # Create a scheduler and run the event loop
     try:
         scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank)
+        # Sent to the main process that the scheduler is ready. 
+        print(f"[DEBUG scheduler.py] Scheduler is piping initialisation information to main process.")
         pipe_writer.send(
             {
                 "status": "ready",
                 "max_total_num_tokens": scheduler.max_total_num_tokens,
                 "max_req_input_len": scheduler.max_req_input_len,
+            }
+        )
+        disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
+
+        if disaggregation_mode == DisaggregationMode.NULL:
+            if server_args.pp_size > 1:
+                scheduler.event_loop_pp()
+            elif scheduler.enable_overlap:
+                scheduler.event_loop_overlap()
+            else:
+                scheduler.event_loop_normal()
+        elif disaggregation_mode == DisaggregationMode.PREFILL:
+            if scheduler.enable_overlap:
+                scheduler.event_loop_overlap_disagg_prefill()
+            else:
+                scheduler.event_loop_normal_disagg_prefill()
+
+        elif disaggregation_mode == DisaggregationMode.DECODE:
+            if scheduler.enable_overlap:
+                scheduler.event_loop_overlap_disagg_decode()
+            else:
+                scheduler.event_loop_normal_disagg_decode()
+
+    except Exception:
+        traceback = get_exception_traceback()
+        logger.error(f"Scheduler hit an exception: {traceback}")
+        parent_process.send_signal(signal.SIGQUIT)
+        
+
+def run_migrate_scheduler_process(
+    server_args: ServerArgs,
+    port_args: PortArgs,
+    gpu_id: int,
+    tp_rank: int,
+    pp_rank: int,
+    dp_rank: Optional[int],
+    pipe_writer,
+):
+    # Generate the prefix
+    prefix = "migrate"
+    if dp_rank is not None:
+        prefix += f" DP{dp_rank}"
+    if server_args.tp_size > 1:
+        prefix += f" TP{tp_rank}"
+    if server_args.pp_size > 1:
+        prefix += f" PP{pp_rank}"
+
+    # Config the process
+    kill_itself_when_parent_died()
+    setproctitle.setproctitle(f"sglang::scheduler_{prefix.replace(' ', '_')}")
+    faulthandler.enable()
+    parent_process = psutil.Process().parent()
+
+    # Configure the logger for this process only
+    configure_logger(server_args, prefix=prefix)
+    suppress_other_loggers()
+
+    # Set cpu affinity to this gpu process
+    if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):
+        set_gpu_proc_affinity(server_args.tp_size, server_args.nnodes, gpu_id)
+
+    # Create a scheduler and run the event loop
+    try:
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank)
+        # Sent to the main process that the scheduler is ready. 
+        print(f"[DEBUG scheduler.py] Migration Scheduler is piping initialisation information to main process.")
+        pipe_writer.send(
+            {
+                "status": "migrate_ready",
             }
         )
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode

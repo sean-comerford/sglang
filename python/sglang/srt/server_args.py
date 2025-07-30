@@ -1349,6 +1349,7 @@ ZMQ_TCP_PORT_DELTA = 233
 
 @dataclasses.dataclass
 class PortArgs:
+    # ipc filename is a unique identifier for each process
     # The ipc filename for tokenizer to receive inputs from detokenizer (zmq)
     tokenizer_ipc_name: str
     # The ipc filename for scheduler (rank 0) to receive inputs from tokenizer (zmq)
@@ -1361,10 +1362,14 @@ class PortArgs:
 
     # The ipc filename for rpc call between Engine and Scheduler
     rpc_ipc_name: str
+    
+    # The ipc filename for schedulers to send messages to tokenizer
+    schedulers_to_tokenizer_ipc_name: str
 
     @staticmethod
     def init_new(server_args, dp_rank: Optional[int] = None) -> "PortArgs":
         port = server_args.port + random.randint(100, 1000)
+        # Loop to find an available port number
         while True:
             if is_port_available(port):
                 break
@@ -1376,11 +1381,13 @@ class PortArgs:
         if not server_args.enable_dp_attention:
             # Normal case, use IPC within a single node
             return PortArgs(
+                # tempfile.NamedTemporaryFile(delete=False) is used to create a unique IPC name
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 nccl_port=port,
-                rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                schedulers_to_tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
             )
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
@@ -1411,6 +1418,7 @@ class PortArgs:
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 1}",
                 nccl_port=port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{port_base + 2}",
+                schedulers_to_tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 4}",
             )
 
 

@@ -37,6 +37,9 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 import torch
 import uvloop
 
+# Debug
+import time
+
 from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
 from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.managers.data_parallel_controller import (
@@ -56,7 +59,9 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
 )
-from sglang.srt.managers.scheduler import run_scheduler_process
+from sglang.srt.managers.scheduler import (
+    run_scheduler_process, run_migrate_scheduler_process
+)
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import (
     guess_chat_template_name_from_model_path,
@@ -546,12 +551,18 @@ def _launch_subprocesses(
 
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
+                # Pipe creates a communication channel between the main process and the scheduler process.
+                # duplex=False means the pipe is unidirectional, i.e., only one end can send messages.
+                # The writer end of the pipe is passed to the scheduler process, reader is kept by the main process.
+                # The scheduler uses the writer to send status or initialization messages (like "ready") back to the main process.
+                # The main process uses the reader to receive these messages and coordinate startup or error handling.
                 reader, writer = mp.Pipe(duplex=False)
                 gpu_id = (
                     server_args.base_gpu_id
                     + ((pp_rank % pp_size_per_node) * tp_size_per_node)
                     + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                 )
+                print(f"[DEBUG engine.py] ------------------------------------ Launching scheduler process on GPU {gpu_id} ------------------------------------")
                 proc = mp.Process(
                     target=run_scheduler_process,
                     args=(
@@ -564,10 +575,42 @@ def _launch_subprocesses(
                         writer,
                     ),
                 )
+                print(f"[DEBUG engine.py] Created original scheduler with ipc filename {port_args.scheduler_input_ipc_name}")
+                
+                # Debugging for starting a second scheduler process on GPU 1
+                # NOTE: Doing this assumes that pp_rank, tp_rank are just 1.
+                reader_1, writer_1 = mp.Pipe(duplex=False)
+                gpu_id_1 = 1
+                port_args_1 = PortArgs.init_new(server_args)
+                proc_1 = mp.Process(
+                    target=run_scheduler_process,
+                    args=(
+                        server_args,
+                        port_args_1,
+                        gpu_id_1,
+                        tp_rank,
+                        pp_rank,
+                        None,
+                        writer_1,
+                    ),
+                )
+                # print(f"[DEBUG engine.py] Created extra scheduler with ipc filename {port_args_1.scheduler_input_ipc_name}")
+                
                 with memory_saver_adapter.configure_subprocess():
                     proc.start()
+                    # print(f"[DEBUG engine.py] Sleeping before launching second scheduler process on GPU {gpu_id_1}")
+                    # import time
+                    # time.sleep(30)
+                    # print(f"[DEBUG engine.py] ------------------------------------ Launching second scheduler process on GPU {gpu_id_1} ------------------------------------")
+                    # proc_1.start()
+                # List or multiprocessing.Process objects, each representing a running scheduler process.
+                # When tensor parallelism or parallel parallelism/pipeline parallelism > 1, multiple scheduler processes are launched, each on a different GPU.
                 scheduler_procs.append(proc)
+                # scheduler_procs.append(proc_1)
+                # If we have multiple scheduler processes, the main process needs to keep track of the readers for each scheduler process.
                 scheduler_pipe_readers.append(reader)
+                # scheduler_pipe_readers.append(reader_1)
+                
     else:
         # Launch the data parallel controller
         reader, writer = mp.Pipe(duplex=False)
@@ -626,7 +669,9 @@ def _launch_subprocesses(
     scheduler_infos = []
     for i in range(len(scheduler_pipe_readers)):
         try:
+            # Get the scheduler information from the scheduler process (line 2233 in scheduler.py sends this data).
             data = scheduler_pipe_readers[i].recv()
+            print(f"[DEBUG engine.py] Tokenizer received scheduler info from scheduler {i}")
         except EOFError:
             logger.error(
                 f"Rank {i} scheduler is dead. Please check if there are relevant logs."
@@ -642,6 +687,8 @@ def _launch_subprocesses(
         scheduler_infos.append(data)
 
     # Assume all schedulers have the same scheduler_info
+    print(f"[DEBUG engine.py] All {len(scheduler_infos)} schedulers are ready")
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
     return tokenizer_manager, scheduler_info
+    
