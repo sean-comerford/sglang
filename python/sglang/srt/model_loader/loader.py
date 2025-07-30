@@ -367,7 +367,7 @@ class DefaultModelLoader(BaseModelLoader):
         device_config: DeviceConfig,
     ) -> nn.Module:
         target_device = torch.device(device_config.device)
-        print(f"[DEBUG Model loader] Loading model on device: {torch.cuda.current_device()}")
+        print(f"[DEBUG loader.py] Loading model on device: {torch.cuda.current_device()}")
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(

@@ -59,9 +59,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
 )
-from sglang.srt.managers.scheduler import (
-    run_scheduler_process, run_migrate_scheduler_process
-)
+from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api.adapter import (
     guess_chat_template_name_from_model_path,
@@ -537,6 +535,8 @@ def _launch_subprocesses(
         scheduler_pipe_readers = []
 
         nnodes_per_tp_group = max(server_args.nnodes // server_args.pp_size, 1)
+        print(f"[DEBUG engine.py] server_args.nnodes is: {server_args.nnodes}")
+        print(f"[DEBUG engine.py] server_args.node_rank is: {server_args.node_rank}")
         tp_size_per_node = server_args.tp_size // nnodes_per_tp_group
         tp_rank_range = range(
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group),
@@ -664,8 +664,38 @@ def _launch_subprocesses(
 
     if server_args.completion_template:
         load_completion_template_for_openai_api(server_args.completion_template)
+        
+    # # Launch migration schedulers on each GPU apart from the current one
+    # # Get the number of GPUs in the current node
+    # num_gpus_node = torch.cuda.device_count()
+    # # Iterate through each GPU, starting a migration process on each one except the one currently being used
+    # for gpu_id in range(num_gpus_node):
+    #     if gpu_id != server_args.base_gpu_id:
+    #         # Create a new port args for the migration scheduler
+    #         port_args_migrate = PortArgs.init_new(server_args)
+    #         reader_migrate, writer_migrate = mp.Pipe(duplex=False)
+    #         print(f"[DEBUG engine.py] ------------------------------------ Launching migration scheduler process on GPU {gpu_id} ------------------------------------")
+    #         # Give default vaules for tp_rank, pp_rank and dp_rank for now. Will send these values to the migration process during setup of migration.
+            
+    #         proc_migrate = mp.Process(
+    #             target=run_migrate_scheduler_process,
+    #             args=(
+    #                 server_args,
+    #                 port_args_migrate,
+    #                 gpu_id,
+    #                 0,  # tp_rank
+    #                 0,  # pp_rank
+    #                 None,
+    #                 writer_migrate,  # writer
+    #             ),
+    #         )
+    #         proc_migrate.start()
+    #         scheduler_procs.append(proc_migrate)
+    #         scheduler_pipe_readers.append(reader_migrate)
+    
+    
 
-    # Wait for the model to finish loading
+    # Wait for the model to finish loading (including the migration processes)
     scheduler_infos = []
     for i in range(len(scheduler_pipe_readers)):
         try:
