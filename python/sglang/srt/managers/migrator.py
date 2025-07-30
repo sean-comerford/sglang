@@ -90,17 +90,16 @@ def run_migrate_scheduler_process(
         parent_process.send_signal(signal.SIGQUIT)
         
 
-def launch_migration_scheduler_process(server_args: ServerArgs):
+def launch_migration_scheduler_process(server_args: ServerArgs, tp_rank, pp_rank, dp_rank=None):
         "Starts a migration scheduler process to handle live migration."
         reader_mig, writer_mig = mp.Pipe(duplex=False)
         gpu_id_mig = 1 # Hardcoded to migrate to GPU 1 for now
         # Hardcode tp_rank and pp_rank to 0 for migration scheduler for now
-        tp_rank = 0
-        pp_rank = 0
         print(f"[DEBUG tokenizer_manager.py] ------------------------------------ Launching migration scheduler process on GPU {gpu_id_mig} ------------------------------------")
         port_args_mig = PortArgs.init_new(server_args)
         print(f"[DEBUG tokenizer_manager.py] Created migration scheduler with ipc filename {port_args_mig.scheduler_input_ipc_name}")
         
+        print(f"[DEBUG tokenizer_manager.py] Launching migration scheduler process with tp_rank {tp_rank}, pp_rank {pp_rank}, dp_rank {dp_rank}.")
         proc_mig = mp.Process(
             target = run_migrate_scheduler_process,
             args=(

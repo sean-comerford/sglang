@@ -1610,8 +1610,8 @@ class Scheduler(
                 self.migrated = True
                 print(f"[DEBUG scheduler.py] KV Allocator usage rate is >= 0.7: {usage_rate:.2f}")
                 # Send message to tokenizer to migrate.
-                print(f"[DEBUG scheduler.py] Sending migration message to tokenizer.")
-                self.send_to_tokenizer.send_pyobj({"msg": "migrate"})
+                print(f"[DEBUG scheduler.py] Sending migration message to tokenizer. tp_rank is {self.tp_rank}, pp_rank is {self.pp_rank}, dp_rank is {self.dp_rank}.")
+                self.send_to_tokenizer.send_pyobj({"msg": "migrate", "tp_rank": self.tp_rank, "pp_rank": self.pp_rank, "dp_rank": self.dp_rank})
                 # Will probably need to define a migration.py to handle this. 
             # print(f"[DEBUG scheduler.py] KV Allocator usage rate: {usage_rate:.2f}")
         return ret

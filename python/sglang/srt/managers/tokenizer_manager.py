@@ -1053,8 +1053,12 @@ class TokenizerManager:
                 # print(f"[DEBUG tokenizer_manager.py] Result from future object is: {result}")
                 # Check if result is subscriptable (e.g., dict) and has "msg"
                 if isinstance(result, dict) and result.get("msg") == "migrate":
-                    # Handle what to do with migrate message here. Launch a new migration scheduler process. 
-                    await self.launch_migration_scheduler()
+                    tp_rank = result.get("tp_rank")
+                    pp_rank = result.get("pp_rank")
+                    dp_rank = result.get("dp_rank")
+
+                    # Handle what to do with migrate message here. Launch a new migration scheduler process.
+                    await self.launch_migration_scheduler(tp_rank, pp_rank, dp_rank)
                 else:
                     self._result_dispatcher(result)
                     self.last_receive_tstamp = time.time()
@@ -1341,12 +1345,12 @@ class TokenizerManager:
     #         proc_mig.join()
     #         logger.error(f"Exit code: {proc_mig.exitcode}")
     #         raise
-    async def launch_migration_scheduler(self):
+    async def launch_migration_scheduler(self, tp_rank: int, pp_rank: int, dp_rank: int):
         """Launches the migration scheduler process asynchronously."""
         loop = asyncio.get_event_loop()
         # Run the blocking process creating in a seperate thread
         self.migration_proc, self.migration_reader_pipe = await loop.run_in_executor(
-            None, launch_migration_scheduler_process, self.server_args
+            None, launch_migration_scheduler_process, self.server_args, tp_rank, pp_rank, dp_rank
         )
         # Add a reader to the event loop to wait for the readiness signal without blocking
         loop.add_reader(self.migration_reader_pipe.fileno(), self.migrator_ready_callback)
