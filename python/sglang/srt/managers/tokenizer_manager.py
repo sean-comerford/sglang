@@ -120,7 +120,7 @@ from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
-from sglang.srt.managers.migrator import launch_migration_scheduler_process
+from sglang.srt.managers.migrator_manager import launch_migration_scheduler_process
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -1057,8 +1057,13 @@ class TokenizerManager:
                     pp_rank = result.get("pp_rank")
                     dp_rank = result.get("dp_rank")
 
-                    # Handle what to do with migrate message here. Launch a new migration scheduler process.
+                    # Launch a new migration scheduler process.
                     await self.launch_migration_scheduler(tp_rank, pp_rank, dp_rank)
+                # Receive the KV cache map from the original scheduler and send it to the migration scheduler
+                elif isinstance(result, tuple):
+                    print(f"[DEBUG tokenizer_manager.py] Received KV map from original scheduler: {result}")
+                    print(f"[DEBUG tokenizer_manager.py] Sending message to migration scheduler to import KV map")
+                    self.send_to_scheduler.send_pyobj({"msg" : "import_kv_map"})
                 else:
                     self._result_dispatcher(result)
                     self.last_receive_tstamp = time.time()
@@ -1359,10 +1364,13 @@ class TokenizerManager:
     def migrator_ready_callback(self):
         """Callback to handle the migration scheduler readiness signal."""
         try:
+            # Wait on this background thread for the migration scheduler to be ready
             data = self.migration_reader_pipe.recv()
             if data.get("status") == "migrate_ready":
-                self.migration_scheduler_ready = True
+                self.migration_scheduler_ready = True                
                 print(f"[DEBUG tokenizer_manager.py] Migration scheduler is ready.")
+                # TODO: Send message to migration scheduler to import its KV map
+                self.send_to_scheduler.send_pyobj({"msg": "import_kv_map"})
             else:
                 raise RuntimeError(
                     "Migration scheduler initialization failed. Please see the error messages above."

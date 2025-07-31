@@ -535,8 +535,6 @@ def _launch_subprocesses(
         scheduler_pipe_readers = []
 
         nnodes_per_tp_group = max(server_args.nnodes // server_args.pp_size, 1)
-        print(f"[DEBUG engine.py] server_args.nnodes is: {server_args.nnodes}")
-        print(f"[DEBUG engine.py] server_args.node_rank is: {server_args.node_rank}")
         tp_size_per_node = server_args.tp_size // nnodes_per_tp_group
         tp_rank_range = range(
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group),
@@ -664,6 +662,9 @@ def _launch_subprocesses(
 
     if server_args.completion_template:
         load_completion_template_for_openai_api(server_args.completion_template)
+    
+    # Launch migrator process
+    
         
     # # Launch migration schedulers on each GPU apart from the current one
     # # Get the number of GPUs in the current node
@@ -695,7 +696,7 @@ def _launch_subprocesses(
     
     
 
-    # Wait for the model to finish loading (including the migration processes)
+    # Wait for the model to finish loading
     scheduler_infos = []
     for i in range(len(scheduler_pipe_readers)):
         try:

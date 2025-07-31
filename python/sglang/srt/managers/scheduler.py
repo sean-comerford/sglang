@@ -189,6 +189,7 @@ class Scheduler(
         tp_rank: int,
         pp_rank: int,
         dp_rank: Optional[int],
+        migrate_scheduler: bool = False,
     ):
         # Parse args
         self.server_args = server_args
@@ -211,10 +212,10 @@ class Scheduler(
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.page_size = server_args.page_size
         # Migration flag
-        self.migrated = False
-        
-        # Initialise KV allocator
-        self.kv_allocator = KVUtil.KVAllocator("mem_access_time")
+        self.already_migrated = False
+        # Is this a migration scheduler or not?
+        self.migrate_scheduler = migrate_scheduler
+    
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
@@ -643,21 +644,37 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            # Cleanest point for live migration.                         
+            # Wait for message from tokenizer that the other migration scheduler processs has been fully loaded.
             recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
-
-            batch = self.get_next_batch_to_run()
-            self.cur_batch = batch
-
-            if batch:
-                result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
+            # Note only the new migration scheduler will get the message "import_kv_cache" from the tokenizer.
+            control_msgs = [req for req in recv_reqs if isinstance(req, dict) and req.get("msg") == "export_kv_map"]
+            if control_msgs:
+                print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER Received message from tokenizer to export kv map.")
+                # Export the kv cache from the original scheduler process to the migrated scheduler process.
+                kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.export_map_table()
+                self.send_to_tokenizer.send_pyobj(kv_map)
+                # The scheduler should block here, as we dont want its kv cache to change anymore since it has been exported to the new migration scheduler process.
+                # The new scheduler process will import the kv cache from the original scheduler process.
+                # This is a blocking call, it will wait until the new scheduler process has imported the kv cache.
+                # TODO: Shutdown the original scheduler process after the migration is done.
+                # This should be clean, make sure to release the physical KV blocks, model weights etc. 
+                self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
             else:
-                # When the server is idle, do self-check and re-init some states
-                self.check_memory()
-                self.new_token_ratio = self.init_new_token_ratio
+                self.process_input_requests(recv_reqs)
 
-            self.last_batch = batch
+                batch = self.get_next_batch_to_run()
+                self.cur_batch = batch
+
+                if batch:
+                    result = self.run_batch(batch)
+                    self.process_batch_result(batch, result)
+                else:
+                    # When the server is idle, do self-check and re-init some states
+                    self.check_memory()
+                    self.new_token_ratio = self.init_new_token_ratio
+
+                self.last_batch = batch
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -811,8 +828,11 @@ class Scheduler(
             if self.attn_tp_rank == 0:
                 recv_reqs = []
 
+                # TODO: Use something like this to receive message from tokenizer to import KV cache, 
+                # but must distinguish between the requests from the tokenizer containing tokens and containing message to import KV cache. 
                 while True:
                     try:
+                        # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
@@ -1531,6 +1551,9 @@ class Scheduler(
         self, batch: ScheduleBatch
     ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
         """Run a batch."""
+        """Sean notes: Take a ScheduleBatch object (represents a batch of requests) and execute a single forward pass of the model.
+        Wraps the outputs (logits_output and next_token_ids) in a GenerationBatchResult or EmbeddingBatchResult object, and returns it tot he main event 
+        loop. This result contains the newly generated token for every single request that was in the batch."""
         self.forward_ct += 1
 
         # Check profiler
@@ -1544,11 +1567,13 @@ class Scheduler(
             logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
             time.sleep(self.forward_sleep_time)
 
-        # Run forward
+        # Run forward. tp_worker.forward_batch_generation is a blocking operation that sends the prepared
+        # inputs to the GPU and executes one full forward pass of the model.
         if self.is_generation:
             if self.spec_algorithm.is_none():
                 model_worker_batch = batch.get_model_worker_batch()
                 if self.pp_group.is_last_rank:
+                    # Outputs from the model worker are logits and next token ids.
                     logits_output, next_token_ids = (
                         self.tp_worker.forward_batch_generation(model_worker_batch)
                     )
@@ -1605,9 +1630,9 @@ class Scheduler(
             )
         if batch.forward_mode.is_decode():
             # print(f"[DEBUG scheduler.py] Finished decoding step for a batch, decoded {len(batch.output_ids)} tokens.")
-            usage_rate = self.kv_allocator.get_usage_rate()
-            if usage_rate >= 0.7 and not self.migrated:
-                self.migrated = True
+            usage_rate = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.get_usage_rate()
+            if usage_rate >= 0.7 and not self.already_migrated:
+                self.already_migrated = True
                 print(f"[DEBUG scheduler.py] KV Allocator usage rate is >= 0.7: {usage_rate:.2f}")
                 # Send message to tokenizer to migrate.
                 print(f"[DEBUG scheduler.py] Sending migration message to tokenizer. tp_rank is {self.tp_rank}, pp_rank is {self.pp_rank}, dp_rank is {self.dp_rank}.")
@@ -1622,7 +1647,11 @@ class Scheduler(
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
         launch_done: Optional[threading.Event] = None,
     ):
+        """If run_batch is the "computation" step, process_batch_result is the "state update and output" step.
+        It appends the new token ID generated for each request to that requests sequence of output tokens
+        Updates the KV cache"""
         if batch.forward_mode.is_decode():
+            # process_batch_result_decode is in the managers.scheduler_output_processor_mixin.py file.
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
             self.process_batch_result_prefill(batch, result, launch_done)
@@ -2247,7 +2276,7 @@ def run_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
-        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank)
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, migrate_scheduler=False)
         # Sent to the main process that the scheduler is ready. 
         print(f"[DEBUG scheduler.py] Scheduler is piping initialisation information to main process.")
         pipe_writer.send(

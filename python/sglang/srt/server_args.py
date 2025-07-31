@@ -1387,7 +1387,7 @@ class PortArgs:
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 nccl_port=port,
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
-                schedulers_to_tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+                schedulers_to_tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
             )
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.

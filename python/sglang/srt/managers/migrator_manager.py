@@ -3,6 +3,7 @@ import setproctitle
 import faulthandler
 import psutil
 import signal
+import zmq
 
 
 
@@ -15,12 +16,12 @@ from sglang.srt.utils import (
     get_bool_env_var,
     configure_logger,
     suppress_other_loggers,
+    get_zmq_socket,
 )
 from sglang.srt.managers.scheduler import Scheduler, DisaggregationMode
 from sglang.utils import get_exception_traceback
-
-
-
+   
+        
 def run_migrate_scheduler_process(
     server_args: ServerArgs,
     port_args: PortArgs,
@@ -55,7 +56,7 @@ def run_migrate_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
-        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank)
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, migrate_scheduler=True)
         # Sent to the main process that the scheduler is ready. 
         print(f"[DEBUG scheduler.py] Migration Scheduler is piping initialisation information to main process.")
         pipe_writer.send(

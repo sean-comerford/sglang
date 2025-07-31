@@ -27,6 +27,18 @@ SGLang has two levels of memory pool.
 ReqToTokenPool maps a request to its token locations.
 TokenToKVPoolAllocator manages the indices to kv cache data.
 KVCache actually holds the physical kv cache.
+Sean notes:
+MHATokenToKVPool(inherits from KVCache) represents the actual, large, contiguous block of GPU memory allocated for the entire KV cache. 
+Its where the keys and value tensors for all tokens of ongoing requests are physically stored.
+This class directly interacts with the underlying hardware and the C++ KVUtil extension to get pointers to memory and perform read/write operations.
+
+TokenToKVPoolAllocator abstracts away the raw memory of the KVCache into a pool of discrete, numbered "token slots". 
+Its the master allocator for the entire KVCache. It maintains a list of all available token slots within the physical KVCache.
+When a token needs to be processed, this allocator provides a free slot from its pool. When a request is finished, the slots are returned to this allocator. 
+
+ReqToTokenPool maps a specific inference request to the token slots it has been assigned by the TokenToKVPoolAllocator.
+Each request gets its own entry (like a row in a table) in this pool. This entry is a sequence that stores the indices of the token slots that belong to this request, in the correct order.
+
 """
 
 import abc
