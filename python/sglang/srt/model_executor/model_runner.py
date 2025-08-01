@@ -150,6 +150,7 @@ class ModelRunner:
 
         # Model-specific adjustment
         self.model_specific_adjustment()
+        
 
         if server_args.show_time_cost:
             enable_show_time_cost()
@@ -204,7 +205,8 @@ class ModelRunner:
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=self.server_args.enable_memory_saver
         )
-
+      
+        
         # Load the model
         self.sampler = Sampler()
         self.load_model()

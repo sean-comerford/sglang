@@ -56,14 +56,14 @@ def run_migrate_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
-        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, migrate_scheduler=True)
-        # Sent to the main process that the scheduler is ready. 
         print(f"[DEBUG scheduler.py] Migration Scheduler is piping initialisation information to main process.")
         pipe_writer.send(
             {
                 "status": "migrate_ready",
             }
         )
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, migrate_scheduler=True)
+        # Sent to the main process that the scheduler is ready.
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
 
         if disaggregation_mode == DisaggregationMode.NULL:
@@ -121,3 +121,4 @@ def launch_migration_scheduler_process(server_args: ServerArgs, tp_rank, pp_rank
             proc_mig.start()
         
         return proc_mig, reader_mig
+    

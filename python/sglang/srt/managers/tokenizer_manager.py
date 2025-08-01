@@ -155,6 +155,7 @@ class TokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
+        migration_scheduler_ipc_map: Optional[Dict[int, str]] = None,
     ):
         # Parse args
         self.server_args = server_args
@@ -174,7 +175,10 @@ class TokenizerManager:
         self.recv_from_scheduler = get_zmq_socket(
             context, zmq.PULL, port_args.schedulers_to_tokenizer_ipc_name, True
         )
-        print(f"[DEBUG tokenizer_manager.py] initialised IPC with scheduler at {port_args.scheduler_input_ipc_name}")
+        print(f"[DEBUG tokenizer_manager.py] TokenizerManager is receiving from scheduler at {port_args.schedulers_to_tokenizer_ipc_name}")
+        
+        self.context = context
+    
         
 
         # Read model args
@@ -247,6 +251,13 @@ class TokenizerManager:
         self.migration_scheduler_ready = False
         self.migration_proc = None
         self.migration_reader_pipe = None
+        
+        # GPU to migrate to
+        self.migration_gpu = None
+        # For sending messages to this gpu
+        self.send_to_migration_scheduler = None
+        # Map from GPU ID to IPC name for migration scheduler
+        self.migration_scheduler_ipc_map = migration_scheduler_ipc_map or {}
 
         # Set after scheduler is initialized
         self.max_req_input_len = None
@@ -1053,17 +1064,32 @@ class TokenizerManager:
                 # print(f"[DEBUG tokenizer_manager.py] Result from future object is: {result}")
                 # Check if result is subscriptable (e.g., dict) and has "msg"
                 if isinstance(result, dict) and result.get("msg") == "migrate":
+                    print(f"[DEBUG tokenizer_manager.py] ***************Received migration request from scheduler: {result}******************")
                     tp_rank = result.get("tp_rank")
                     pp_rank = result.get("pp_rank")
                     dp_rank = result.get("dp_rank")
+                    self.migration_gpu = result.get("migration_gpu")
+                    # Get the table mapping from gpu -> ipc_name
+                    migration_ipc_name = self.migration_scheduler_ipc_map[self.migration_gpu]
+                    
+                    
+                    self.send_to_migration_scheduler = get_zmq_socket(
+                        self.context, zmq.PUSH, migration_ipc_name, True
+                    )
 
-                    # Launch a new migration scheduler process.
-                    await self.launch_migration_scheduler(tp_rank, pp_rank, dp_rank)
-                # Receive the KV cache map from the original scheduler and send it to the migration scheduler
+                    # Tell migration scheduler to load model weights
+                    print(f"[DEBUG tokenizer_manager.py] *************************Telling migration scheduler to load model weights*************************")
+                    print(f"[DEBUG tokenizer_manager.py] Migration ipc name address: {migration_ipc_name}")
+                    self.send_to_migration_scheduler.send_pyobj({"msg" : "load_model_weights"})
+                # Handle receiving the kv_map from the original scheduler
                 elif isinstance(result, tuple):
-                    print(f"[DEBUG tokenizer_manager.py] Received KV map from original scheduler: {result}")
-                    print(f"[DEBUG tokenizer_manager.py] Sending message to migration scheduler to import KV map")
-                    self.send_to_scheduler.send_pyobj({"msg" : "import_kv_map"})
+                    # Send this to the migration scheduler
+                    print(f"[DEBUG tokenizer_manager.py] Received kv map from original scheduler: {result}")
+                    self.send_to_migration_scheduler.send_pyobj(result)
+                    print(f"[DEBUG tokenizer_manager.py] Sent kv map to migration scheduler: {result}")
+                    print(f"[DEBUG tokenizer_manager.py] Now sleeping.....")
+                    time.sleep(60)
+                    
                 else:
                     self._result_dispatcher(result)
                     self.last_receive_tstamp = time.time()
@@ -1305,41 +1331,29 @@ class TokenizerManager:
             if len(self.model_update_tmp) == self.server_args.dp_size:
                 self.model_update_result.set_result(self.model_update_tmp)
 
-    # def launch_migration_scheduler(self):
-    #     "Starts a migration scheduler process to handle live migration."
-    #     reader_mig, writer_mig = mp.Pipe(duplex=False)
-    #     gpu_id_mig = 1 # Hardcoded to migrate to GPU 1 for now
-    #     # Hardcode tp_rank and pp_rank to 0 for migration scheduler for now
-    #     tp_rank = 0
-    #     pp_rank = 0
-    #     print(f"[DEBUG tokenizer_manager.py] ------------------------------------ Launching migration scheduler process on GPU {gpu_id_mig} ------------------------------------")
-    #     port_args_mig = PortArgs.init_new(self.server_args)
-    #     print(f"[DEBUG tokenizer_manager.py] Created migration scheduler with ipc filename {port_args_mig.scheduler_input_ipc_name}")
-        
-    #     proc_mig = mp.Process(
-    #         target = run_migrate_scheduler_process,
-    #         args=(
-    #             self.server_args,
-    #             port_args_mig,
-    #             gpu_id_mig,
-    #             tp_rank,
-    #             pp_rank,
-    #             None,
-    #             writer_mig,
-    #         ),
+    # async def launch_migration_scheduler(self, tp_rank: int, pp_rank: int, dp_rank: int):
+    #     """Launches the migration scheduler process asynchronously."""
+    #     loop = asyncio.get_event_loop()
+    #     # Run the blocking process creating in a seperate thread
+    #     self.migration_proc, self.migration_reader_pipe = await loop.run_in_executor(
+    #         None, launch_migration_scheduler_process, self.server_args, tp_rank, pp_rank, dp_rank
     #     )
-    #     memory_saver_adapter = TorchMemorySaverAdapter.create(
-    #         enable=self.server_args.enable_memory_saver
-    #     )
+    #     # Add a reader to the event loop to wait for the readiness signal without blocking
+    #     loop.add_reader(self.migration_reader_pipe.fileno(), self.migrator_ready_callback)
+    #     print(f"[DEBUG tokenizer_manager.py] Migration scheduler process launched. Waiting for it to become ready...")
         
-    #     with memory_saver_adapter.configure_subprocess():
-    #         proc_mig.start()
-        
-    #     # Wait for the migration scheduler to be ready
+    # def migrator_ready_callback(self):
+    #     """Callback to handle the migration scheduler readiness signal."""
     #     try:
-    #         data_mig = reader_mig.recv()
-    #         print(f"[DEBUG tokenizer_manager.py] Tokenizer has received message from migration scheduler, it has started: {data_mig}")
-    #         if data_mig["status"] != "migrate_ready":
+    #         # Wait on this background thread for the migration scheduler to be ready
+    #         data = self.migration_reader_pipe.recv()
+    #         if data.get("status") == "migrate_ready":
+    #             self.migration_scheduler_ready = True                
+    #             print(f"[DEBUG tokenizer_manager.py] Migration scheduler is ready.")
+    #             # Send message to original scheduler to load its model weights
+    #             # Scheduler will handle if it is a migration or original scheduler.
+    #             self.send_to_scheduler.send_pyobj({"msg": "load_model_weights"})
+    #         else:
     #             raise RuntimeError(
     #                 "Migration scheduler initialization failed. Please see the error messages above."
     #             )
@@ -1347,44 +1361,12 @@ class TokenizerManager:
     #         logger.error(
     #             f"Migration scheduler is dead. Please check if there are relevant logs."
     #         )
-    #         proc_mig.join()
-    #         logger.error(f"Exit code: {proc_mig.exitcode}")
-    #         raise
-    async def launch_migration_scheduler(self, tp_rank: int, pp_rank: int, dp_rank: int):
-        """Launches the migration scheduler process asynchronously."""
-        loop = asyncio.get_event_loop()
-        # Run the blocking process creating in a seperate thread
-        self.migration_proc, self.migration_reader_pipe = await loop.run_in_executor(
-            None, launch_migration_scheduler_process, self.server_args, tp_rank, pp_rank, dp_rank
-        )
-        # Add a reader to the event loop to wait for the readiness signal without blocking
-        loop.add_reader(self.migration_reader_pipe.fileno(), self.migrator_ready_callback)
-        print(f"[DEBUG tokenizer_manager.py] Migration scheduler process launched. Waiting for it to become ready...")
-        
-    def migrator_ready_callback(self):
-        """Callback to handle the migration scheduler readiness signal."""
-        try:
-            # Wait on this background thread for the migration scheduler to be ready
-            data = self.migration_reader_pipe.recv()
-            if data.get("status") == "migrate_ready":
-                self.migration_scheduler_ready = True                
-                print(f"[DEBUG tokenizer_manager.py] Migration scheduler is ready.")
-                # TODO: Send message to migration scheduler to import its KV map
-                self.send_to_scheduler.send_pyobj({"msg": "import_kv_map"})
-            else:
-                raise RuntimeError(
-                    "Migration scheduler initialization failed. Please see the error messages above."
-                )
-        except EOFError:
-            logger.error(
-                f"Migration scheduler is dead. Please check if there are relevant logs."
-            )
-        finally:
-            # Clean up the reader and the pipe
-            loop = asyncio.get_event_loop()
-            loop.remove_reader(self.migration_reader_pipe.fileno())
-            self.migration_reader_pipe.close()
-            self.migration_reader_pipe = None
+    #     finally:
+    #         # Clean up the reader and the pipe
+    #         loop = asyncio.get_event_loop()
+    #         loop.remove_reader(self.migration_reader_pipe.fileno())
+    #         self.migration_reader_pipe.close()
+    #         self.migration_reader_pipe = None
             
 async def print_exception_wrapper(func):
     """

@@ -189,7 +189,8 @@ class Scheduler(
         tp_rank: int,
         pp_rank: int,
         dp_rank: Optional[int],
-        migrate_scheduler: bool = False,
+        is_migrate_scheduler: bool,
+        migrate_scheduler_ipc_map = None,
     ):
         # Parse args
         self.server_args = server_args
@@ -213,9 +214,12 @@ class Scheduler(
         self.page_size = server_args.page_size
         # Migration flag
         self.already_migrated = False
-        # Is this a migration scheduler or not?
-        self.migrate_scheduler = migrate_scheduler
-    
+        # Flag to indicate if this scheduler is a migrated one
+        self.is_migrate_scheduler = is_migrate_scheduler
+        self.migration_request_list: List = []
+        self.migrate_scheduler_ipc_map = migrate_scheduler_ipc_map
+        # Hardcoding migration gpu to 1 for now
+        self.migration_gpu = 1 
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
@@ -236,6 +240,14 @@ class Scheduler(
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
             )
+            
+            if is_migrate_scheduler:
+                # Need to get the IPC name for this migrator scheduler from the dict
+                migrate_scheduler_ipc_name = migrate_scheduler_ipc_map[self.migration_gpu]
+                self.migrator_recv_from_tokenizer = get_zmq_socket(
+                    context, zmq.PULL, migrate_scheduler_ipc_name, False
+                )
+                print(f"[DEBUG scheduler.py] Migrator Scheduler is receiving from tokenizer at {migrate_scheduler_ipc_name}")
 
             if server_args.skip_tokenizer_init:
                 # Directly send to the TokenizerManager
@@ -273,7 +285,17 @@ class Scheduler(
         if not self.is_generation:
             self.enable_overlap = False
             logger.info("Overlap scheduler is disabled for embedding models.")
-
+        
+        if self.is_migrate_scheduler:
+            print(f"[DEBUG scheduler.py] ******************Waiting for message from tokenizer to load model weights******************")
+            while True:
+                migration_request = self.migrator_recv_from_tokenizer.recv_pyobj()  # This blocks
+                if isinstance(migration_request, dict) and migration_request.get("msg") == "load_model_weights":
+                    print(f"[DEBUG scheduler.py] Migrator Scheduler received message from tokenizer to load model weights")
+                    break
+                
+                
+                
         # Launch a tensor parallel worker
         if self.enable_overlap:
             TpWorkerClass = TpModelWorkerClient
@@ -493,6 +515,7 @@ class Scheduler(
                     revision=server_args.revision,
                 )
 
+        
     def init_memory_pool_and_cache(self):
         server_args = self.server_args
 
@@ -647,34 +670,41 @@ class Scheduler(
             # Cleanest point for live migration.                         
             # Wait for message from tokenizer that the other migration scheduler processs has been fully loaded.
             recv_reqs = self.recv_requests()
-            # Note only the new migration scheduler will get the message "import_kv_cache" from the tokenizer.
-            control_msgs = [req for req in recv_reqs if isinstance(req, dict) and req.get("msg") == "export_kv_map"]
-            if control_msgs:
-                print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER Received message from tokenizer to export kv map.")
-                # Export the kv cache from the original scheduler process to the migrated scheduler process.
-                kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.export_map_table()
-                self.send_to_tokenizer.send_pyobj(kv_map)
-                # The scheduler should block here, as we dont want its kv cache to change anymore since it has been exported to the new migration scheduler process.
-                # The new scheduler process will import the kv cache from the original scheduler process.
-                # This is a blocking call, it will wait until the new scheduler process has imported the kv cache.
-                # TODO: Shutdown the original scheduler process after the migration is done.
-                # This should be clean, make sure to release the physical KV blocks, model weights etc. 
-                self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+            # migration_reqs = self.recv_migration_requests()
+            # if migration_reqs:
+            #     for mig_req in migration_reqs:
+            #         if isinstance(mig_req, dict) and not self.migrate_scheduler and mig_req.get("msg") == "export_kv_map":
+            #             print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER received message from tokenizer to export kv map")
+            #             # Export the kv cache from the original scheduler process to the migrated scheduler process.
+            #             start_export = time.time()
+            #             kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.export_map_table()
+            #             end_export = time.time()
+            #             start_send = time.time()
+            #             self.send_to_tokenizer.send_pyobj(kv_map)
+            #             end_send = time.time()
+            #             print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER exported kv map in {end_export - start_export:.2f}s, sent to tokenizer in {end_send - start_send:.2f}s")
+            #             # TODO: Shut down the original scheudler gracefully, releasing any held kv blocks, model weights etc
+            #         elif isinstance(mig_req, tuple) and self.migrate_scheduler:
+            #             print(f"[DEBUG scheduler.py] MIGRATED SCHEDULER Received message from tokenizer to import kv map.")
+            #             # Import the kv cache from the original scheduler process.
+            #             start_import = time.time()
+            #             kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.import_map_table()
+            #             end_import = time.time()
+            #             print(f"[DEBUG scheduler.py] MIGRATED SCHEDULER imported kv map in {end_import - start_import:.2f}s")
+            self.process_input_requests(recv_reqs)
+
+            batch = self.get_next_batch_to_run()
+            self.cur_batch = batch
+
+            if batch:
+                result = self.run_batch(batch)
+                self.process_batch_result(batch, result)
             else:
-                self.process_input_requests(recv_reqs)
+                # When the server is idle, do self-check and re-init some states
+                self.check_memory()
+                self.new_token_ratio = self.init_new_token_ratio
 
-                batch = self.get_next_batch_to_run()
-                self.cur_batch = batch
-
-                if batch:
-                    result = self.run_batch(batch)
-                    self.process_batch_result(batch, result)
-                else:
-                    # When the server is idle, do self-check and re-init some states
-                    self.check_memory()
-                    self.new_token_ratio = self.init_new_token_ratio
-
-                self.last_batch = batch
+            self.last_batch = batch
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -833,10 +863,18 @@ class Scheduler(
                 while True:
                     try:
                         # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
-                        recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                        if self.is_migrate_scheduler:
+                            recv_req = self.migrator_recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                            print(f"[DEBUG scheduler.py] Migrator Scheduler received request from tokenizer: {recv_req}")
+                        else:
+                            recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
-                    recv_reqs.append(recv_req)
+                    # If the request is a dict (a migration message) add it to its own list
+                    if isinstance(recv_req, dict):
+                        self.migration_request_list.append(recv_req)
+                    else: 
+                        recv_reqs.append(recv_req)
 
                 while True:
                     try:
@@ -902,6 +940,20 @@ class Scheduler(
                 src=self.tp_group.ranks[0],
             )
         return recv_reqs
+    
+    
+    def recv_migration_requests(self):
+        """Receive requests from tokenizer to migration scheduler about migration."""
+        recv_reqs = []
+        while True:
+            try:
+                # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
+                recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+            except zmq.ZMQError:
+                break
+            recv_reqs.append(recv_req)
+        return recv_reqs
+
 
     def process_input_requests(self, recv_reqs: List):
         for recv_req in recv_reqs:
@@ -919,6 +971,19 @@ class Scheduler(
                         self.recv_from_rpc.send_pyobj(output)
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
+    
+    # def process_migration_requests(self):
+    #     print(f"[DEBUG scheduler.py]----------------------In process_migration_requests()-------------------------")
+    #     # Will block until it receives a "load_model_weights" message
+    #     while True:
+    #         print(f"[DEBUG scheduler.py] self.migration_request_list: {self.migration_request_list}")
+    #         if self.migration_request_list:
+    #             mig_req = self.migration_request_list.pop(0)
+    #             if mig_req.get("msg") == "load_model_weights":
+    #                 print(f"[DEBUG scheduler.py] --------------------Received message from tokenizer to load model weights.------------------------------")
+    #                 return
+    #             # Optionally handle other messages here
+        
 
     def handle_generate_request(
         self,
@@ -1636,8 +1701,10 @@ class Scheduler(
                 print(f"[DEBUG scheduler.py] KV Allocator usage rate is >= 0.7: {usage_rate:.2f}")
                 # Send message to tokenizer to migrate.
                 print(f"[DEBUG scheduler.py] Sending migration message to tokenizer. tp_rank is {self.tp_rank}, pp_rank is {self.pp_rank}, dp_rank is {self.dp_rank}.")
-                self.send_to_tokenizer.send_pyobj({"msg": "migrate", "tp_rank": self.tp_rank, "pp_rank": self.pp_rank, "dp_rank": self.dp_rank})
-                # Will probably need to define a migration.py to handle this. 
+                self.send_to_tokenizer.send_pyobj({"msg": "migrate", "tp_rank": self.tp_rank, "pp_rank": self.pp_rank, "dp_rank": self.dp_rank, "migration_gpu": self.migration_gpu})
+                # TODO: Now need to start adding KV cache to migration GPU (1)
+                # For now, just have function that tells prepare_access in kv_allocator.cpp to use GPU 1
+                self.token_to_kv_pool_allocator.get_kvcache().kv_pool.set_allocation_gpu
             # print(f"[DEBUG scheduler.py] KV Allocator usage rate: {usage_rate:.2f}")
         return ret
 
@@ -2246,6 +2313,8 @@ def run_scheduler_process(
     pp_rank: int,
     dp_rank: Optional[int],
     pipe_writer,
+    is_migrate_scheduler: bool,
+    migrate_scheduler_ipc_map = None,
 ):
     # Generate the prefix
     prefix = ""
@@ -2276,40 +2345,41 @@ def run_scheduler_process(
 
     # Create a scheduler and run the event loop
     try:
-        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, migrate_scheduler=False)
-        # Sent to the main process that the scheduler is ready. 
-        print(f"[DEBUG scheduler.py] Scheduler is piping initialisation information to main process.")
-        pipe_writer.send(
-            {
-                "status": "ready",
-                "max_total_num_tokens": scheduler.max_total_num_tokens,
-                "max_req_input_len": scheduler.max_req_input_len,
-            }
-        )
-        disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
+        scheduler = Scheduler(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank, is_migrate_scheduler, migrate_scheduler_ipc_map)
+        # Sent to the main process that the scheduler is ready.
+        if not is_migrate_scheduler:
+            print(f"[DEBUG scheduler.py] Scheduler is piping initialisation information to main process.")
+            pipe_writer.send(
+                {
+                    "status": "ready",
+                    "max_total_num_tokens": scheduler.max_total_num_tokens,
+                    "max_req_input_len": scheduler.max_req_input_len,
+                }
+            )
+            disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
 
-        if disaggregation_mode == DisaggregationMode.NULL:
-            if server_args.pp_size > 1:
-                scheduler.event_loop_pp()
-            elif scheduler.enable_overlap:
-                scheduler.event_loop_overlap()
-            else:
-                scheduler.event_loop_normal()
-        elif disaggregation_mode == DisaggregationMode.PREFILL:
-            if scheduler.enable_overlap:
-                scheduler.event_loop_overlap_disagg_prefill()
-            else:
-                scheduler.event_loop_normal_disagg_prefill()
+            if disaggregation_mode == DisaggregationMode.NULL:
+                if server_args.pp_size > 1:
+                    scheduler.event_loop_pp()
+                elif scheduler.enable_overlap:
+                    scheduler.event_loop_overlap()
+                else:
+                    scheduler.event_loop_normal()
+            elif disaggregation_mode == DisaggregationMode.PREFILL:
+                if scheduler.enable_overlap:
+                    scheduler.event_loop_overlap_disagg_prefill()
+                else:
+                    scheduler.event_loop_normal_disagg_prefill()
 
-        elif disaggregation_mode == DisaggregationMode.DECODE:
-            if scheduler.enable_overlap:
-                scheduler.event_loop_overlap_disagg_decode()
-            else:
-                scheduler.event_loop_normal_disagg_decode()
+            elif disaggregation_mode == DisaggregationMode.DECODE:
+                if scheduler.enable_overlap:
+                    scheduler.event_loop_overlap_disagg_decode()
+                else:
+                    scheduler.event_loop_normal_disagg_decode()
 
     except Exception:
         traceback = get_exception_traceback()
         logger.error(f"Scheduler hit an exception: {traceback}")
         parent_process.send_signal(signal.SIGQUIT)
         
-
+    

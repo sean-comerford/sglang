@@ -242,7 +242,7 @@ class KVCache(abc.ABC):
 
 
 class TokenToKVPoolAllocator:
-    """An allocator managing the indices to kv cache data."""
+    """An allocator managing the token indices to kv cache data."""
 
     def __init__(
         self,
