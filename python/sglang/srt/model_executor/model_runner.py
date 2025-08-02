@@ -436,6 +436,7 @@ class ModelRunner:
         return min_per_gpu_memory
 
     def load_model(self):
+        print(f"[DEBUG model_runner.py] Loading model onto GPU {self.gpu_id}. self.device is {self.device}.")
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
             f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"

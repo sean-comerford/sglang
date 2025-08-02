@@ -367,7 +367,10 @@ class Scheduler(
         )
 
         # Init memory pool and cache
+        print(f"[DEBUG scheduler.py] Initialising memory pool and cache...")
         self.init_memory_pool_and_cache()
+        print(f"[DEBUG scheduler.py] Memory pool and cache initialised successfully.")
+        
 
         # Init running status
         self.waiting_queue: List[Req] = []
@@ -399,15 +402,17 @@ class Scheduler(
         self.is_mixed_chunk = (
             self.chunked_prefill_size is not None and server_args.enable_mixed_chunk
         )
-
-        # Init the grammar backend for constrained generation
-        self.grammar_queue: List[Req] = []
-        if not server_args.skip_tokenizer_init:
-            self.grammar_backend = create_grammar_backend(
-                server_args, self.tokenizer, self.model_config.vocab_size
-            )
-        else:
-            self.grammar_backend = None
+        
+        
+        if not is_migrate_scheduler:
+            # Init the grammar backend for constrained generation
+            self.grammar_queue: List[Req] = []
+            if not server_args.skip_tokenizer_init:
+                self.grammar_backend = create_grammar_backend(
+                    server_args, self.tokenizer, self.model_config.vocab_size
+                )
+            else:
+                self.grammar_backend = None
 
         # Init schedule policy and new token estimation
         self.policy = SchedulePolicy(
@@ -2331,9 +2336,10 @@ def run_scheduler_process(
     faulthandler.enable()
     parent_process = psutil.Process().parent()
 
-    # [For Router] if env var "SGLANG_DP_RANK" exist, set dp_rank to the value of the env var
-    if dp_rank is None and "SGLANG_DP_RANK" in os.environ:
-        dp_rank = int(os.environ["SGLANG_DP_RANK"])
+    if not is_migrate_scheduler:
+        # [For Router] if env var "SGLANG_DP_RANK" exist, set dp_rank to the value of the env var
+        if dp_rank is None and "SGLANG_DP_RANK" in os.environ:
+            dp_rank = int(os.environ["SGLANG_DP_RANK"])
 
     # Configure the logger
     configure_logger(server_args, prefix=prefix)
@@ -2356,26 +2362,26 @@ def run_scheduler_process(
                     "max_req_input_len": scheduler.max_req_input_len,
                 }
             )
-            disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
+        disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
 
-            if disaggregation_mode == DisaggregationMode.NULL:
-                if server_args.pp_size > 1:
-                    scheduler.event_loop_pp()
-                elif scheduler.enable_overlap:
-                    scheduler.event_loop_overlap()
-                else:
-                    scheduler.event_loop_normal()
-            elif disaggregation_mode == DisaggregationMode.PREFILL:
-                if scheduler.enable_overlap:
-                    scheduler.event_loop_overlap_disagg_prefill()
-                else:
-                    scheduler.event_loop_normal_disagg_prefill()
+        if disaggregation_mode == DisaggregationMode.NULL:
+            if server_args.pp_size > 1:
+                scheduler.event_loop_pp()
+            elif scheduler.enable_overlap:
+                scheduler.event_loop_overlap()
+            else:
+                scheduler.event_loop_normal()
+        elif disaggregation_mode == DisaggregationMode.PREFILL:
+            if scheduler.enable_overlap:
+                scheduler.event_loop_overlap_disagg_prefill()
+            else:
+                scheduler.event_loop_normal_disagg_prefill()
 
-            elif disaggregation_mode == DisaggregationMode.DECODE:
-                if scheduler.enable_overlap:
-                    scheduler.event_loop_overlap_disagg_decode()
-                else:
-                    scheduler.event_loop_normal_disagg_decode()
+        elif disaggregation_mode == DisaggregationMode.DECODE:
+            if scheduler.enable_overlap:
+                scheduler.event_loop_overlap_disagg_decode()
+            else:
+                scheduler.event_loop_normal_disagg_decode()
 
     except Exception:
         traceback = get_exception_traceback()
