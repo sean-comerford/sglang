@@ -367,9 +367,9 @@ class Scheduler(
         )
 
         # Init memory pool and cache
-        print(f"[DEBUG scheduler.py] Initialising memory pool and cache...")
+        # TODO: See if you should init everything with the memory pool and kv_cache here on the migration scheduler or 
+        # just import it from the original scheduler. 
         self.init_memory_pool_and_cache()
-        print(f"[DEBUG scheduler.py] Memory pool and cache initialised successfully.")
         
 
         # Init running status
@@ -673,7 +673,11 @@ class Scheduler(
         """A normal scheduler loop."""
         while True:
             # Cleanest point for live migration.                         
-            # Wait for message from tokenizer that the other migration scheduler processs has been fully loaded.
+            # If migration scheduler, wait for message from tokenizer with the state of the original scheduler
+            if self.is_migrate_scheduler:
+                print(f"[DEBUG scheduler.py] Migrator scheduler is blocking at top of event_loop_normal for message from tokenizer with the state of the original scheduler")
+                migration_req = self.migrator_recv_from_tokenizer.recv_pyobj()
+                
             recv_reqs = self.recv_requests()
             # migration_reqs = self.recv_migration_requests()
             # if migration_reqs:
@@ -867,19 +871,14 @@ class Scheduler(
                 # but must distinguish between the requests from the tokenizer containing tokens and containing message to import KV cache. 
                 while True:
                     try:
-                        # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
-                        if self.is_migrate_scheduler:
-                            recv_req = self.migrator_recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
-                            print(f"[DEBUG scheduler.py] Migrator Scheduler received request from tokenizer: {recv_req}")
-                        else:
+                        # # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
+                        # if self.is_migrate_scheduler:
+                        #     recv_req = self.migrator_recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+                        #     print(f"[DEBUG scheduler.py] Migrator Scheduler received request from tokenizer: {recv_req}")
                             recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
-                    # If the request is a dict (a migration message) add it to its own list
-                    if isinstance(recv_req, dict):
-                        self.migration_request_list.append(recv_req)
-                    else: 
-                        recv_reqs.append(recv_req)
+                    recv_reqs.append(recv_req)
 
                 while True:
                     try:
