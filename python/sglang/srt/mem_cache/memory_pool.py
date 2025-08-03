@@ -277,6 +277,13 @@ class TokenToKVPoolAllocator:
         self.batch_prepare_access_time = 0
         self.batch_layers_prepared = 0
       
+    # def __getstate__(self):
+    #     state = self.__dict__.copy()
+    #     # Replace _kvcache with its own getstate (which strips unpicklables)
+    #     if "_kvcache" in state and hasattr(state["_kvcache"], "__getstate__"):
+    #         state["_kvcache"] = state["_kvcache"].__getstate__()
+    #     return state
+
     def shutdown(self):
         self._kvcache.close()
         
@@ -337,18 +344,18 @@ class TokenToKVPoolAllocator:
         end_time_prep = time.perf_counter()
         elapsed_us_prep = (end_time_prep - start_time_prep) * 1e6
 
-        with prepare_access_csv_lock:
-            with open(
-                f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/prepare_access_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv",
-                'a', newline=''
-            ) as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow([
-                    "prepare_access_all_layers",
-                    elapsed_us_prep,
-                    num_tokens,
-                    self._kvcache.layer_num
-                ])
+        # with prepare_access_csv_lock:
+        #     with open(
+        #         f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/prepare_access_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv",
+        #         'a', newline=''
+        #     ) as csv_file:
+        #         writer = csv.writer(csv_file)
+        #         writer.writerow([
+        #             "prepare_access_all_layers",
+        #             elapsed_us_prep,
+        #             num_tokens,
+        #             self._kvcache.layer_num
+        #         ])
 
         self.log_allocated_size()
         return select_index
@@ -427,7 +434,7 @@ class MHATokenToKVPool(KVCache):
         self.batch_write_total_time = 0
         self.batch_layers_written = 0
         self.batch_tokens_count = 0
-        self.batch_write_lock = threading.Lock()
+        # self.batch_write_lock = threading.Lock()
         self.current_request_id = 0
         
         # Add batch read tracking variables
@@ -435,7 +442,7 @@ class MHATokenToKVPool(KVCache):
         self.batch_read_total_time = 0
         self.batch_layers_read = 0
         self.batch_read_tokens_count = 0
-        self.batch_read_lock = threading.Lock()
+        # self.batch_read_lock = threading.Lock()
         
         print(f"[DEBUG] MHATokenToKVPool has been initialised with size: {size}, page_size: {page_size}, dtype: {dtype}, head_num: {head_num}, head_dim: {head_dim}, layer_num: {layer_num}, device: {device}, tp_size: {tp_size}")
         self.size = size
@@ -704,21 +711,21 @@ class MHATokenToKVPool(KVCache):
         join_end = time.perf_counter()
         join_elapsed_us = (join_end - join_start) * 1e6
         
-        with self.batch_write_lock:
-            # Initialize batch tracking on first layer
-            if layer_id == 0:
-                self.batch_write_start_time = time.perf_counter()
-                self.batch_write_total_time = 0
-                self.batch_layers_written = 0
-                self.batch_tokens_count = len(loc)
-                # Initialize background sync tracking
-                self.batch_sync_total_time = 0
+        # with self.batch_write_lock:
+        #     # Initialize batch tracking on first layer
+        #     if layer_id == 0:
+        #         self.batch_write_start_time = time.perf_counter()
+        #         self.batch_write_total_time = 0
+        #         self.batch_layers_written = 0
+        #         self.batch_tokens_count = len(loc)
+        #         # Initialize background sync tracking
+        #         self.batch_sync_total_time = 0
                 
-                if self.batch_tokens_count == 128 or self.batch_tokens_count == 64 or self.batch_tokens_count == 256 or self.batch_tokens_count == 512:
-                    self.current_request_id += 1
+        #         if self.batch_tokens_count == 128 or self.batch_tokens_count == 64 or self.batch_tokens_count == 256 or self.batch_tokens_count == 512:
+        #             self.current_request_id += 1
 
-            # Accumulate background sync time
-            self.batch_sync_total_time += join_elapsed_us
+        #     # Accumulate background sync time
+        #     self.batch_sync_total_time += join_elapsed_us
 
         start_time_write = time.perf_counter()
         self.kv_pool.write_kv(layer_index, loc, cache_k, token_size, self.store_dtype, 1, layer_id, self.layer_num) # k
@@ -726,41 +733,82 @@ class MHATokenToKVPool(KVCache):
         end_time_write = time.perf_counter()
         elapsed_us = (end_time_write - start_time_write) * 1e6
         
-        with self.batch_write_lock:
-            self.batch_write_total_time += elapsed_us
-            self.batch_layers_written += 1
+        # with self.batch_write_lock:
+        #     self.batch_write_total_time += elapsed_us
+        #     self.batch_layers_written += 1
 
-            # If this is the last layer, record both write time AND background sync time
-            if self.batch_layers_written == self.layer_num:
-                # Find the total size (bytes) of all the writes across all the layers for this token
-                size_in_bytes = self.batch_tokens_count * self.head_num * self.head_dim * self.layer_num * torch.tensor(0, dtype=self.store_dtype).element_size()
-                # Average bytes written for each layer
-                avg_size_per_layer = size_in_bytes / self.layer_num
-                # Log total write time across all layers
-                with write_csv_lock:
-                    with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/write_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
-                        writer = csv.writer(csv_file)
-                        writer.writerow([
-                            "write_kv_all_layers",
-                            self.batch_tokens_count,
-                            layer_id,  # This is the last layer's ID, you may want to use a special value or the request ID
-                            self.batch_write_total_time,
-                            avg_size_per_layer  # Average size written per layer
-                        ])
-                # ... (background sync logging and reset)
+        #     # If this is the last layer, record both write time AND background sync time
+        #     if self.batch_layers_written == self.layer_num:
+        #         # Find the total size (bytes) of all the writes across all the layers for this token
+        #         size_in_bytes = self.batch_tokens_count * self.head_num * self.head_dim * self.layer_num * torch.tensor(0, dtype=self.store_dtype).element_size()
+        #         # Average bytes written for each layer
+        #         avg_size_per_layer = size_in_bytes / self.layer_num
+        #         # Log total write time across all layers
+        #         with write_csv_lock:
+        #             with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/write_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+        #                 writer = csv.writer(csv_file)
+        #                 writer.writerow([
+        #                     "write_kv_all_layers",
+        #                     self.batch_tokens_count,
+        #                     layer_id,  # This is the last layer's ID, you may want to use a special value or the request ID
+        #                     self.batch_write_total_time,
+        #                     avg_size_per_layer  # Average size written per layer
+        #                 ])
+        #         # ... (background sync logging and reset)
 
-                # # Log accumulated background synchronization time across all layers
-                # with background_sync_csv_lock:
-                #     with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/background_synchronisation_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
-                #                 writer = csv.writer(csv_file)
-                #                 writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
+        #         # # Log accumulated background synchronization time across all layers
+        #         # with background_sync_csv_lock:
+        #         #     with open(f"/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/" + f"{BATCH_SIZE}_batch_size/{DATASET}/data/background_synchronisation_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv", 'a', newline='') as csv_file:
+        #         #                 writer = csv.writer(csv_file)
+        #         #                 writer.writerow(["background_synchronisation_all_layers", self.batch_sync_total_time, self.batch_tokens_count, layer_id])
                         
-                # Reset for next batch
-                self.batch_write_start_time = None
-                self.batch_write_total_time = 0
-                self.batch_layers_written = 0
-                self.batch_tokens_count = 0
-                self.batch_sync_total_time = 0
+        #         # Reset for next batch
+        #         self.batch_write_start_time = None
+        #         self.batch_write_total_time = 0
+        #         self.batch_layers_written = 0
+        #         self.batch_tokens_count = 0
+        #         self.batch_sync_total_time = 0
+        
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove the kv_pool to avoid pickling issues
+        if "kv_pool" in state:
+            del state['kv_pool']
+        # Will just have to let migrator kv_allocator rebuild the k_buffer_cache and v_buffer_cache using torch::from_blob, see
+        # kv_allocator.cpp get_buffer_tensor and kv_allocator.h k_cache_tensor_cache and v_cache_tensor_cache
+        if "k_buffer_cache" in state:
+            del state["k_buffer_cache"]
+        if "v_buffer_cache" in state:
+            del state["v_buffer_cache"]
+        if "k_buffer_pt" in state:
+            del state["k_buffer_pt"]
+        if "v_buffer_pt" in state:
+            del state["v_buffer_pt"]
+        if "device_module" in state:
+            del state["device_module"]
+        # # Remove the memory saver adapter to avoid pickling issues
+        # del state["memory_saver_adapter"]
+        # # Remove the alloc_job_queue to avoid pickling issues
+        # # del state["alloc_job_queue"]
+        # # Remove the alloc_thread to avoid pickling issues
+        # # del state["alloc_thread"]
+        # # Remove the stop_event to avoid pickling issues
+        # # del state["stop_event"]
+        # # Remove the alloc_lock to avoid pickling issues
+        # # del state["alloc_lock"]
+        # # Remove the capture_mode to avoid pickling issues
+        # del state["capture_mode"]
+        # # Remove the tp_size to avoid pickling issues
+        # del state["tp_size"]
+        # # Remove the kv_pool to avoid pickling issues
+        
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+    
+    def restore_post_migration(self):
+        return self.kv_pool, self.k_buffer_cache, self.v_buffer_cache, self.k_buffer_pt, self.v_buffer_pt, self.device_module
 
 @torch.compile 
 def fused_downcast(
@@ -1502,3 +1550,4 @@ class MLATokenToKVPoolHost(HostKVCache):
         cache_v: torch.Tensor,
     ) -> None:
         raise NotImplementedError()
+    

@@ -28,6 +28,9 @@ from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple, Union
 import KVUtil
+import struct
+import tempfile
+import socket
 
 import psutil
 import setproctitle
@@ -220,6 +223,8 @@ class Scheduler(
         self.migrate_scheduler_ipc_map = migrate_scheduler_ipc_map
         # Hardcoding migration gpu to 1 for now
         self.migration_gpu = 1 
+        # Flag for when migration is completed to shutdown the original scheduler.
+        self.migration_completed = False
         
         # For handling different messages from the tokenizer
         self.pending_messages = []
@@ -680,11 +685,70 @@ class Scheduler(
             # print(f"[DEBUG scheduler.py] req_to_token_pool = {self.req_to_token_pool}, token_to_kv_pool_allocator={self.token_to_kv_pool_allocator}")
             # print(f"[DEBUG scheduler.py] req_to_token_pool tensor is {self.req_to_token_pool.req_to_token}")
             if self.is_migrate_scheduler:
+                # TODO: Store here the objects that wont come from the imported token_to_kv_pool_allocator, then after importing the token_to_kv_pool_allocator object,
+                # assign these stored objects to it. these objects are the kv_pool, k_buffer_cache, v_buffer_cache, k_buffer_pt, v_buffer_pt and device_module.
+                migrator_kv_pool, migrator_k_buffer_cache, migrator_v_buffer_cache, migrator_k_buffer_pt, migrator_v_buffer_pt, migrator_device_module = self.token_to_kv_pool_allocator.get_kvcache().restore_post_migration()
                 # Send message to tokenizer that you are ready to receive the state from the original scheduler
                 self.send_to_tokenizer.send_pyobj({"msg": "ready_for_migration"})
                 print(f"[DEBUG scheduler.py] Migrator scheduler is blocking at top of event_loop_normal for message from tokenizer with the state of the original scheduler")
                 imported_state = self.migrator_recv_from_tokenizer.recv_pyobj()
-                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER RECEIVED STATE FROM TOKENIZER {imported_state}-------------------------")
+                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER RECEIVED STATE FROM TOKENIZER ------------------------")
+                self.req_to_token_pool = imported_state["req_to_token_pool"]
+                # This imported token_to_kv_pool_allocator is missing the objects that couldnt be pickled.
+                # These objects are the kv_pool, k_buffer_cache, v_buffer_cache, k_buffer_pt, v_buffer_pt and device_module.
+                # So must add these from the migrated scheduler into this imported token_to_kv_pool_allocator.
+                self.token_to_kv_pool_allocator = imported_state["token_to_kv_pool_allocator"]
+                self.grammar_queue = imported_state["grammar_queue"]
+                self.tree_cache = imported_state["tree_cache"]
+                self.running_batch = imported_state["running_batch"]
+                self.waiting_queue = imported_state["waiting_queue"]
+                self.cur_batch = imported_state["cur_batch"]
+                self.last_batch = imported_state["last_batch"]
+                self.forward_ct = imported_state["forward_ct"]
+                self.forward_ct_decode = imported_state["forward_ct_decode"]
+                self.num_generated_tokens = imported_state["num_generated_tokens"]
+                self.num_prefill_tokens = imported_state["num_prefill_tokens"]
+                meta    = imported_state["map_meta"]
+                sock    = imported_state["fd_sock"]
+                expect  = imported_state["fd_count"]
+                
+                fds = []
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    s.connect(sock)
+                    # read header
+                    expect = struct.unpack("I", s.recv(4))[0]
+
+                    while len(fds) < expect:
+                        _, anc, *_ = s.recvmsg(1, socket.CMSG_LEN(expect * struct.calcsize("i")))
+                        for level, typ, data in anc:
+                            if (level, typ) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                                fds.extend(struct.unpack(f"{len(data)//4}i", data))
+                for fd in fds:
+                    assert os.readlink(f"/proc/self/fd/{fd}").startswith("/dev/nvidia"), \
+                        f"FD {fd} is not a CUDA handle"
+                
+                
+                # Restoring objects that couldnt be pickled into the imported state
+                self.token_to_kv_pool_allocator.get_kvcache().kv_pool = migrator_kv_pool
+                self.token_to_kv_pool_allocator.get_kvcache().k_buffer_cache = migrator_k_buffer_cache
+                self.token_to_kv_pool_allocator.get_kvcache().v_buffer_cache = migrator_v_buffer_cache
+                self.token_to_kv_pool_allocator.get_kvcache().k_buffer_pt = migrator_k_buffer_pt
+                self.token_to_kv_pool_allocator.get_kvcache().v_buffer_pt = migrator_v_buffer_pt
+                self.token_to_kv_pool_allocator.get_kvcache().device_module = migrator_device_module
+                
+                # Import the kv map table
+                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER IMPORTING KV MAP TABLE-------------------------")
+                full_tuple = (*meta, fds)
+                self.token_to_kv_pool_allocator.get_kvcache().kv_pool.import_map_table(full_tuple)
+                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER FINISHED IMPORTING KV MAP TABLE-------------------------")
+                
+
+                # TODO: Need to get tokenizer to start directing requests to migrated scheduler.
+                # Wait this should already be done since migrated scheduler is already getting requests from tokenizer through recv_requests()
+                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER NOW CONTINUING IN EVENT_LOOP_NORMAL-------------------------")
+                self.migration_completed = True
+                # Need to shutdown the original scheduler gracefully, releasing any held kv blocks, model weights etc
+                
             
             # Need a way to tell original scheduler to export its state (req_to_token_pool etc) to migration scheduler and stop. 
             # Check if there is a message from the tokenizer to export state
@@ -1015,10 +1079,51 @@ class Scheduler(
     def process_state_request(self, state_req):
         print(f"[DEBUG scheduler.py] Processing state request: {state_req}")
         state_info = {}
+        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER IS EXPORTING ITS KV MAP")
+        kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.export_map_table()
+        meta          = tuple(kv_map[:5])   # everything except FDs
+        fd_list       = kv_map[5]
+        fd_count      = len(fd_list)
+        sock_path = tempfile.mktemp(prefix="kv_mig_", dir="/tmp")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(1)
+        
+        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER IS FINISHED EXPORTING ITS KV MAP, First 5 items are kv_map[:5] = {kv_map[:5]}")
         state_info["msg"] = "scheduler_state"
         state_info["req_to_token_pool"] = self.req_to_token_pool
+        state_info["token_to_kv_pool_allocator"] = self.token_to_kv_pool_allocator
+        state_info["waiting_queue"] = self.waiting_queue
+        state_info["grammar_queue"] = self.grammar_queue
+        state_info["tree_cache"] = self.tree_cache
+        state_info["running_batch"] = self.running_batch
+        state_info["cur_batch"] = self.cur_batch
+        state_info["last_batch"] = self.last_batch
+        state_info["forward_ct"] = self.forward_ct
+        state_info["forward_ct_decode"] = self.forward_ct_decode
+        state_info["num_generated_tokens"] = self.num_generated_tokens
+        state_info["num_prefill_tokens"] = self.num_prefill_tokens
+        state_info["map_meta"] = meta
+        state_info["fd_sock"] = sock_path
+        state_info["fd_count"] = fd_count
+        
         self.send_to_tokenizer.send_pyobj(state_info)
-        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER Sent state info to tokenizer: {state_info}")
+        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER Sent state info to tokenizer")
+        conn, _ = srv.accept()
+        with conn:
+            # tiny header: number of FDs (uint32_t)
+            conn.sendall(struct.pack("I", fd_count))
+
+            for fd in fd_list:
+                # sendmsg with SCM_RIGHTS
+                conn.sendmsg(
+                    [b'\0'],
+                    [(socket.SOL_SOCKET,
+                    socket.SCM_RIGHTS,
+                    struct.pack("i", fd))]
+                )
+        srv.close()
+        os.unlink(sock_path)
         
     
     # def process_migration_requests(self):

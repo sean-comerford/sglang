@@ -1093,7 +1093,7 @@ class TokenizerManager:
                     print(f"[DEBUG tokenizer_manager.py] ***************Received message from migration scheduler that it is ready for the state******************")
                     print(f"[DEBUG tokenizer_manager.py] Now getting state from original scheduler")
                     # Get the state from the original scheduler
-                    self.send_to_scheduler.send_pyobj({"msg" : "export_state", "migration_ipc_address" : migration_ipc_name})
+                    self.send_to_scheduler.send_pyobj({"msg" : "export_state"})
                 elif isinstance(result, dict) and result.get("msg") == "scheduler_state":
                     print(f"[DEBUG tokenizer_manager.py] ***************Received state from original scheduler******************")
                     # Then send this state to the migration scheduler. 
