@@ -1082,13 +1082,22 @@ class TokenizerManager:
                     print(f"[DEBUG tokenizer_manager.py] Migration ipc name address: {migration_ipc_name}")
                     self.send_to_migration_scheduler.send_pyobj({"msg" : "load_model_weights"})
                 # Handle receiving the kv_map from the original scheduler
-                elif isinstance(result, tuple):
-                    # Send this to the migration scheduler
-                    print(f"[DEBUG tokenizer_manager.py] Received kv map from original scheduler: {result}")
+                # elif isinstance(result, tuple):
+                #     # Send this to the migration scheduler
+                #     print(f"[DEBUG tokenizer_manager.py] Received kv map from original scheduler: {result}")
+                #     self.send_to_migration_scheduler.send_pyobj(result)
+                #     print(f"[DEBUG tokenizer_manager.py] Sent kv map to migration scheduler: {result}")
+                #     print(f"[DEBUG tokenizer_manager.py] Now sleeping.....")
+                #     time.sleep(60)
+                elif isinstance(result, dict) and result.get("msg") == "ready_for_migration":
+                    print(f"[DEBUG tokenizer_manager.py] ***************Received message from migration scheduler that it is ready for the state******************")
+                    print(f"[DEBUG tokenizer_manager.py] Now getting state from original scheduler")
+                    # Get the state from the original scheduler
+                    self.send_to_scheduler.send_pyobj({"msg" : "export_state", "migration_ipc_address" : migration_ipc_name})
+                elif isinstance(result, dict) and result.get("msg") == "scheduler_state":
+                    print(f"[DEBUG tokenizer_manager.py] ***************Received state from original scheduler******************")
+                    # Then send this state to the migration scheduler. 
                     self.send_to_migration_scheduler.send_pyobj(result)
-                    print(f"[DEBUG tokenizer_manager.py] Sent kv map to migration scheduler: {result}")
-                    print(f"[DEBUG tokenizer_manager.py] Now sleeping.....")
-                    time.sleep(60)
                     
                 else:
                     self._result_dispatcher(result)

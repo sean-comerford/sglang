@@ -154,6 +154,7 @@ if not kv_logger.handlers:
 GB = 1024 * 1024 * 1024
 MB = 1024 * 1024
 
+# Object created in model_runner.py
 class ReqToTokenPool:
     """A memory pool that maps a request to its token locations."""
 
@@ -171,9 +172,15 @@ class ReqToTokenPool:
         self.size = size
         self.max_context_len = max_context_len
         self.device = device
+        # 2D tensor. Each row represents a different inference request, each column
+        # represents a position in that requests token sequence.
+        # Values stored are indices pointing to token slots in the physical KV cache. 
+        # Size is the max number of requests that can be served at a time.
+        print(f"[DEBUG memory_pool.py] req_to_token_pool tensor is created on device {device}")
         self.req_to_token = torch.zeros(
             (size, max_context_len), dtype=torch.int32, device=device
         )
+        # Free rows in the req_to_token_pool available for allocation to new requests
         self.free_slots = list(range(size))
 
     def write(self, indices, values):

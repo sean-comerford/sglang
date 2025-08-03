@@ -220,6 +220,9 @@ class Scheduler(
         self.migrate_scheduler_ipc_map = migrate_scheduler_ipc_map
         # Hardcoding migration gpu to 1 for now
         self.migration_gpu = 1 
+        
+        # For handling different messages from the tokenizer
+        self.pending_messages = []
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
@@ -248,7 +251,7 @@ class Scheduler(
                     context, zmq.PULL, migrate_scheduler_ipc_name, False
                 )
                 print(f"[DEBUG scheduler.py] Migrator Scheduler is receiving from tokenizer at {migrate_scheduler_ipc_name}")
-
+                
             if server_args.skip_tokenizer_init:
                 # Directly send to the TokenizerManager
                 self.send_to_detokenizer = get_zmq_socket(
@@ -674,9 +677,22 @@ class Scheduler(
         while True:
             # Cleanest point for live migration.                         
             # If migration scheduler, wait for message from tokenizer with the state of the original scheduler
+            # print(f"[DEBUG scheduler.py] req_to_token_pool = {self.req_to_token_pool}, token_to_kv_pool_allocator={self.token_to_kv_pool_allocator}")
+            # print(f"[DEBUG scheduler.py] req_to_token_pool tensor is {self.req_to_token_pool.req_to_token}")
             if self.is_migrate_scheduler:
+                # Send message to tokenizer that you are ready to receive the state from the original scheduler
+                self.send_to_tokenizer.send_pyobj({"msg": "ready_for_migration"})
                 print(f"[DEBUG scheduler.py] Migrator scheduler is blocking at top of event_loop_normal for message from tokenizer with the state of the original scheduler")
-                migration_req = self.migrator_recv_from_tokenizer.recv_pyobj()
+                imported_state = self.migrator_recv_from_tokenizer.recv_pyobj()
+                print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER RECEIVED STATE FROM TOKENIZER {imported_state}-------------------------")
+            
+            # Need a way to tell original scheduler to export its state (req_to_token_pool etc) to migration scheduler and stop. 
+            # Check if there is a message from the tokenizer to export state
+            state_req = self.recv_state_requests()
+            if state_req:
+                print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER RECEIVED MESSAGE FROM TOKENIZER TO EXPORT STATE")
+                self.process_state_request(state_req)
+                
                 
             recv_reqs = self.recv_requests()
             # migration_reqs = self.recv_migration_requests()
@@ -702,6 +718,7 @@ class Scheduler(
             #             print(f"[DEBUG scheduler.py] MIGRATED SCHEDULER imported kv map in {end_import - start_import:.2f}s")
             self.process_input_requests(recv_reqs)
 
+            # Tries to start a new batch of requests first. If it cant, it then creates a batch to generate the next token for all currently running requests.
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
@@ -861,14 +878,33 @@ class Scheduler(
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
 
+    def recv_state_requests(self) -> Optional[dict]:
+        # First check buffered messages
+        for i, msg in enumerate(self.pending_messages):
+            if isinstance(msg, dict) and msg.get("msg") == "export_state":
+                return self.pending_messages.pop(i)
+        
+        # Check for new messages
+        try:
+            message = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
+            if isinstance(message, dict) and message.get("msg") == "export_state":
+                return message
+            else:
+                if self.pp_rank == 0:
+                    if self.attn_tp_rank == 0:
+                        self.pending_messages.append(message)
+                return None
+        except zmq.ZMQError:
+            return None
+    
+    
     def recv_requests(self) -> List[Req]:
-        """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
+        """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""        
         if self.pp_rank == 0:
             if self.attn_tp_rank == 0:
-                recv_reqs = []
-
-                # TODO: Use something like this to receive message from tokenizer to import KV cache, 
-                # but must distinguish between the requests from the tokenizer containing tokens and containing message to import KV cache. 
+                recv_reqs = self.pending_messages.copy()
+                self.pending_messages.clear()
+                
                 while True:
                     try:
                         # # NOBLOCK: If there is no message available, it raises a ZMQError instead of waiting
@@ -975,6 +1011,15 @@ class Scheduler(
                         self.recv_from_rpc.send_pyobj(output)
                 else:
                     self.send_to_tokenizer.send_pyobj(output)
+    
+    def process_state_request(self, state_req):
+        print(f"[DEBUG scheduler.py] Processing state request: {state_req}")
+        state_info = {}
+        state_info["msg"] = "scheduler_state"
+        state_info["req_to_token_pool"] = self.req_to_token_pool
+        self.send_to_tokenizer.send_pyobj(state_info)
+        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER Sent state info to tokenizer: {state_info}")
+        
     
     # def process_migration_requests(self):
     #     print(f"[DEBUG scheduler.py]----------------------In process_migration_requests()-------------------------")
@@ -1379,12 +1424,19 @@ class Scheduler(
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
         chunked_req_to_exclude = set()
+        # Note: chunked_req is not always none, need to handle it. 
+        # Chunked request is used to handle the case where a prompt is too long to fit in a single microbatch, so split into smaller chunks.
+        # These chunks are processed one by one in multiple forward passes. 
+        # print(f"[DEBUG scheduler.py] chunked_req is {self.chunked_req}")
         if self.chunked_req:
             # Move the chunked request out of the batch so that we can merge
-            # only finished requests to running_batch.
+            # only finished requests to running_batch. By finished requests they mean requests that have finished their prefill phase and now must
+            # be moved into the running batch for decoding. 
             chunked_req_to_exclude.add(self.chunked_req)
+            # PREEMPTION: Store the KV cache state of the chunked request so far so that we dont have to start from scratch when we resume this request.
             self.tree_cache.cache_unfinished_req(self.chunked_req)
             # chunked request keeps its rid but will get a new req_pool_idx
+            # This releases the active blocks 
             self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.last_batch.chunked_req is not None:
