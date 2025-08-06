@@ -64,6 +64,8 @@ class SamplingBatchInfo:
     def from_schedule_batch(cls, batch: ScheduleBatch, vocab_size: int):
         reqs = batch.reqs
         device = batch.device
+        if device == "cuda":
+            device = f"cuda:{torch.cuda.current_device()}"
         temperatures = (
             torch.tensor(
                 [r.sampling_params.temperature for r in reqs],

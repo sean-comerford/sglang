@@ -1068,6 +1068,9 @@ class TokenizerManager:
                     tp_rank = result.get("tp_rank")
                     pp_rank = result.get("pp_rank")
                     dp_rank = result.get("dp_rank")
+                    # Get the pointers to the start of the key and value virtual address space
+                    key_pointer = result.get("k_vm_ptr")
+                    value_pointer = result.get("v_vm_ptr")
                     self.migration_gpu = result.get("migration_gpu")
                     # Get the table mapping from gpu -> ipc_name
                     migration_ipc_name = self.migration_scheduler_ipc_map[self.migration_gpu]
@@ -1080,7 +1083,7 @@ class TokenizerManager:
                     # Tell migration scheduler to load model weights
                     print(f"[DEBUG tokenizer_manager.py] *************************Telling migration scheduler to load model weights*************************")
                     print(f"[DEBUG tokenizer_manager.py] Migration ipc name address: {migration_ipc_name}")
-                    self.send_to_migration_scheduler.send_pyobj({"msg" : "load_model_weights"})
+                    self.send_to_migration_scheduler.send_pyobj({"msg" : "load_model_weights", "key_ptr": key_pointer, "value_ptr": value_pointer, "tp_rank": tp_rank, "pp_rank": pp_rank, "dp_rank": dp_rank})
                 # Handle receiving the kv_map from the original scheduler
                 # elif isinstance(result, tuple):
                 #     # Send this to the migration scheduler

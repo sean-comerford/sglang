@@ -31,6 +31,7 @@ import KVUtil
 import struct
 import tempfile
 import socket
+import ctypes
 
 import psutil
 import setproctitle
@@ -228,6 +229,10 @@ class Scheduler(
         
         # For handling different messages from the tokenizer
         self.pending_messages = []
+        
+        # To store the start of the key and value virtual address space from the original scheduler
+        self.key_pointer = None
+        self.value_pointer = None
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
@@ -300,6 +305,8 @@ class Scheduler(
                 migration_request = self.migrator_recv_from_tokenizer.recv_pyobj()  # This blocks
                 if isinstance(migration_request, dict) and migration_request.get("msg") == "load_model_weights":
                     print(f"[DEBUG scheduler.py] Migrator Scheduler received message from tokenizer to load model weights")
+                    self.key_pointer = migration_request.get("key_ptr")
+                    self.value_pointer = migration_request.get("value_ptr")
                     break
                 
                 
@@ -317,6 +324,9 @@ class Scheduler(
             pp_rank=pp_rank,
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
+            # Pass the desired start of the key and value virtual address space for the migrated scheduler. 
+            key_pointer=self.key_pointer,
+            value_pointer=self.value_pointer
         )
 
         # Launch a draft worker for speculative decoding
@@ -375,10 +385,13 @@ class Scheduler(
         )
 
         # Init memory pool and cache
-        # TODO: See if you should init everything with the memory pool and kv_cache here on the migration scheduler or 
-        # just import it from the original scheduler. 
-        self.init_memory_pool_and_cache()
-        
+        # TODO: Migrate scheduler should not arbitrarily allocate virtual memory with cuMemAddressReserve, want its 
+        # virtual address space to be the same as the original schedulers.
+
+        if is_migrate_scheduler:
+            self.init_memory_pool_and_cache(key_pointer=self.key_pointer, value_pointer=self.value_pointer)
+        else:
+            self.init_memory_pool_and_cache()
 
         # Init running status
         self.waiting_queue: List[Req] = []
@@ -529,9 +542,9 @@ class Scheduler(
                 )
 
         
-    def init_memory_pool_and_cache(self):
+    def init_memory_pool_and_cache(self, key_pointer=None, value_pointer=None):
         server_args = self.server_args
-
+            
         self.req_to_token_pool, self.token_to_kv_pool_allocator = (
             self.tp_worker.get_memory_pool()
         )
@@ -684,9 +697,10 @@ class Scheduler(
             # If migration scheduler, wait for message from tokenizer with the state of the original scheduler
             # print(f"[DEBUG scheduler.py] req_to_token_pool = {self.req_to_token_pool}, token_to_kv_pool_allocator={self.token_to_kv_pool_allocator}")
             # print(f"[DEBUG scheduler.py] req_to_token_pool tensor is {self.req_to_token_pool.req_to_token}")
-            if self.is_migrate_scheduler:
+            if self.is_migrate_scheduler and self.already_migrated is False:
                 # TODO: Store here the objects that wont come from the imported token_to_kv_pool_allocator, then after importing the token_to_kv_pool_allocator object,
-                # assign these stored objects to it. these objects are the kv_pool, k_buffer_cache, v_buffer_cache, k_buffer_pt, v_buffer_pt and device_module.
+                # assign these stored objects to it. these objects are the kv_pool, k_buffer_cache, v_buffer_cache, and device_module.
+                # So these were created by the migrated scheduler before it started waiting for the message from the tokenizer.
                 migrator_kv_pool, migrator_k_buffer_cache, migrator_v_buffer_cache, migrator_k_buffer_pt, migrator_v_buffer_pt, migrator_device_module = self.token_to_kv_pool_allocator.get_kvcache().restore_post_migration()
                 # Send message to tokenizer that you are ready to receive the state from the original scheduler
                 self.send_to_tokenizer.send_pyobj({"msg": "ready_for_migration"})
@@ -703,14 +717,16 @@ class Scheduler(
                 self.running_batch = imported_state["running_batch"]
                 self.waiting_queue = imported_state["waiting_queue"]
                 self.cur_batch = imported_state["cur_batch"]
-                self.last_batch = imported_state["last_batch"]
-                self.forward_ct = imported_state["forward_ct"]
-                self.forward_ct_decode = imported_state["forward_ct_decode"]
-                self.num_generated_tokens = imported_state["num_generated_tokens"]
-                self.num_prefill_tokens = imported_state["num_prefill_tokens"]
+                # self.last_batch = imported_state["last_batch"]
+                # self.forward_ct = imported_state["forward_ct"]
+                # self.forward_ct_decode = imported_state["forward_ct_decode"]
+                # self.num_generated_tokens = imported_state["num_generated_tokens"]
+                # self.num_prefill_tokens = imported_state["num_prefill_tokens"]
                 meta    = imported_state["map_meta"]
                 sock    = imported_state["fd_sock"]
                 expect  = imported_state["fd_count"]
+                
+                    
                 
                 fds = []
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -742,12 +758,29 @@ class Scheduler(
                 self.token_to_kv_pool_allocator.get_kvcache().kv_pool.import_map_table(full_tuple)
                 print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER FINISHED IMPORTING KV MAP TABLE-------------------------")
                 
+                if self.running_batch is not None:
+                    resolved = self.device
+                    if resolved == "cuda":
+                        resolved = f"cuda:{torch.cuda.current_device()}"
+                    self.running_batch.device = resolved
+
+                    # tensors accessed immediately after migration
+                    if (
+                        hasattr(self.running_batch, "seq_lens")
+                        and self.running_batch.seq_lens is not None
+                        and self.running_batch.seq_lens.device != torch.device(resolved)
+                    ):
+                        self.running_batch.seq_lens = self.running_batch.seq_lens.to(
+                            resolved, non_blocking=True
+                        )
 
                 # TODO: Need to get tokenizer to start directing requests to migrated scheduler.
                 # Wait this should already be done since migrated scheduler is already getting requests from tokenizer through recv_requests()
                 print(f"[DEBUG scheduler.py] -------------------------MIGRATED SCHEDULER NOW CONTINUING IN EVENT_LOOP_NORMAL-------------------------")
                 self.migration_completed = True
+                self.already_migrated = True
                 # Need to shutdown the original scheduler gracefully, releasing any held kv blocks, model weights etc
+                
                 
             
             # Need a way to tell original scheduler to export its state (req_to_token_pool etc) to migration scheduler and stop. 
@@ -756,6 +789,10 @@ class Scheduler(
             if state_req:
                 print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER RECEIVED MESSAGE FROM TOKENIZER TO EXPORT STATE")
                 self.process_state_request(state_req)
+                # TODO: Shutdown the original scheduler.
+                # Right now just make it sleep for a long time to simulate shutdown
+                print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER NOW SLEEPING FOR 2000 SECONDS TO SIMULATE SHUTDOWN")
+                time.sleep(2000)
                 
                 
             recv_reqs = self.recv_requests()
@@ -1081,15 +1118,15 @@ class Scheduler(
         state_info = {}
         print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER IS EXPORTING ITS KV MAP")
         kv_map = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.export_map_table()
-        meta          = tuple(kv_map[:5])   # everything except FDs
-        fd_list       = kv_map[5]
+        meta          = tuple(kv_map[:6])   # everything except FDs
+        fd_list       = kv_map[6]
         fd_count      = len(fd_list)
         sock_path = tempfile.mktemp(prefix="kv_mig_", dir="/tmp")
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(sock_path)
         srv.listen(1)
         
-        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER IS FINISHED EXPORTING ITS KV MAP, First 5 items are kv_map[:5] = {kv_map[:5]}")
+        print(f"[DEBUG scheduler.py] ORIGINAL SCHEDULER IS FINISHED EXPORTING ITS KV MAP")
         state_info["msg"] = "scheduler_state"
         state_info["req_to_token_pool"] = self.req_to_token_pool
         state_info["token_to_kv_pool_allocator"] = self.token_to_kv_pool_allocator
@@ -1098,11 +1135,11 @@ class Scheduler(
         state_info["tree_cache"] = self.tree_cache
         state_info["running_batch"] = self.running_batch
         state_info["cur_batch"] = self.cur_batch
-        state_info["last_batch"] = self.last_batch
-        state_info["forward_ct"] = self.forward_ct
-        state_info["forward_ct_decode"] = self.forward_ct_decode
-        state_info["num_generated_tokens"] = self.num_generated_tokens
-        state_info["num_prefill_tokens"] = self.num_prefill_tokens
+        # state_info["last_batch"] = self.last_batch
+        # state_info["forward_ct"] = self.forward_ct
+        # state_info["forward_ct_decode"] = self.forward_ct_decode
+        # state_info["num_generated_tokens"] = self.num_generated_tokens
+        # state_info["num_prefill_tokens"] = self.num_prefill_tokens
         state_info["map_meta"] = meta
         state_info["fd_sock"] = sock_path
         state_info["fd_count"] = fd_count
@@ -1753,6 +1790,7 @@ class Scheduler(
 
             retracted_reqs, new_token_ratio = batch.retract_decode(self.server_args)
             self.new_token_ratio = new_token_ratio
+            print(f"[DEBUG scheduler.py] ************************RETRACTED REQS: {len(retracted_reqs)}*************************************************")
 
             logger.info(
                 "Decode out of memory happened. "
@@ -1857,18 +1895,27 @@ class Scheduler(
         if batch.forward_mode.is_decode():
             # print(f"[DEBUG scheduler.py] Finished decoding step for a batch, decoded {len(batch.output_ids)} tokens.")
             usage_rate = self.token_to_kv_pool_allocator.get_kvcache().kv_pool.get_usage_rate()
-            if usage_rate >= 0.7 and not self.already_migrated:
+            if usage_rate >= 0.68 and not self.already_migrated and not self.is_migrate_scheduler:
                 self.already_migrated = True
                 print(f"[DEBUG scheduler.py] KV Allocator usage rate is >= 0.7: {usage_rate:.2f}")
                 # Send message to tokenizer to migrate.
                 print(f"[DEBUG scheduler.py] Sending migration message to tokenizer. tp_rank is {self.tp_rank}, pp_rank is {self.pp_rank}, dp_rank is {self.dp_rank}.")
-                self.send_to_tokenizer.send_pyobj({"msg": "migrate", "tp_rank": self.tp_rank, "pp_rank": self.pp_rank, "dp_rank": self.dp_rank, "migration_gpu": self.migration_gpu})
+                k_ptr = get_capsule_pointer(
+                    self.token_to_kv_pool_allocator.get_kvcache().get_key_ptr()
+                )
+                v_ptr = get_capsule_pointer(
+                    self.token_to_kv_pool_allocator.get_kvcache().get_value_ptr()
+                )
+                self.send_to_tokenizer.send_pyobj({"msg": "migrate", "tp_rank": self.tp_rank, "pp_rank": self.pp_rank, "dp_rank": self.dp_rank, "migration_gpu": self.migration_gpu,
+                                                   # The pointers to the start of the key and value space in the virtual address. 
+                                                   "k_vm_ptr" : k_ptr, "v_vm_ptr": v_ptr})
                 # TODO: Now need to start adding KV cache to migration GPU (1)
                 # For now, just have function that tells prepare_access in kv_allocator.cpp to use GPU 1
                 self.token_to_kv_pool_allocator.get_kvcache().kv_pool.set_allocation_gpu
             # print(f"[DEBUG scheduler.py] KV Allocator usage rate: {usage_rate:.2f}")
         return ret
-
+    
+    
     def process_batch_result(
         self,
         batch: ScheduleBatch,
@@ -2545,3 +2592,18 @@ def run_scheduler_process(
         parent_process.send_signal(signal.SIGQUIT)
         
     
+def get_capsule_pointer(capsule):
+    """Extract pointer value from PyCapsule"""
+    if capsule is None:
+        return None
+    
+    get_ptr = ctypes.pythonapi.PyCapsule_GetPointer
+    get_ptr.restype = ctypes.c_void_p
+    get_ptr.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    
+    try:
+        ptr_val = get_ptr(capsule, None)
+        return ptr_val
+    except Exception as e:
+        logger.error(f"Failed to extract pointer from PyCapsule: {e}")
+        return None

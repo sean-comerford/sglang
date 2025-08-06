@@ -427,6 +427,8 @@ class MHATokenToKVPool(KVCache):
         tp_size: int,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        key_pointer: Optional[int] = None,
+        value_pointer: Optional[int] = None,
     ):
         
         # Add batch write tracking variables
@@ -462,6 +464,11 @@ class MHATokenToKVPool(KVCache):
         self.layer_num = layer_num
         self.kv_pool = KVUtil.KVAllocator("mem_access_time")
         self.tp_size = tp_size
+        # # To ensure the migrated scheduler reserves virtual memory at the correct location
+        # self.key_pointer = key_pointer
+        # self.value_pointer = value_pointer
+        self.original_key_pointer = key_pointer
+        self.original_value_pointer = value_pointer
         self._create_buffers()
         self.k_buffer_cache = {}
         self.v_buffer_cache = {}
@@ -473,6 +480,8 @@ class MHATokenToKVPool(KVCache):
         self.device_module = torch.get_device_module(self.device)
 
         k_size, v_size = self.get_kv_size_bytes()
+    
+            
         
         
         logger.info(
@@ -569,9 +578,16 @@ class MHATokenToKVPool(KVCache):
             distance_layer = (self.size + self.page_size) * self.head_num * self.head_dim
             token_size = self.head_num * self.head_dim
             is_k = 1
-            self.k_buffer_pt =  self.kv_pool.allocate_kv(alloc_size, token_size, self.layer_num, distance_layer, is_k)
-            is_k = 0
-            self.v_buffer_pt =  self.kv_pool.allocate_kv(alloc_size, token_size, self.layer_num, distance_layer, is_k)
+            # If migration scheduler
+            if self.original_key_pointer and self.original_value_pointer:
+                self.k_buffer_pt = self.kv_pool.allocate_kv_migrator(alloc_size, token_size, self.layer_num, distance_layer, is_k, original_base_ptr=self.original_key_pointer)
+                is_k = 0
+                self.v_buffer_pt = self.kv_pool.allocate_kv_migrator(alloc_size, token_size, self.layer_num, distance_layer, is_k, original_base_ptr=self.original_value_pointer)
+            else:
+                self.k_buffer_pt =  self.kv_pool.allocate_kv(alloc_size, token_size, self.layer_num, distance_layer, is_k)
+                print(f"[DEBUG] THE TYPE OF THE KV_BUFFER_PT IS {type(self.k_buffer_pt)}")
+                is_k = 0
+                self.v_buffer_pt =  self.kv_pool.allocate_kv(alloc_size, token_size, self.layer_num, distance_layer, is_k)
 
     def _clear_buffers(self):
         # del self.k_buffer
@@ -809,6 +825,16 @@ class MHATokenToKVPool(KVCache):
     
     def restore_post_migration(self):
         return self.kv_pool, self.k_buffer_cache, self.v_buffer_cache, self.k_buffer_pt, self.v_buffer_pt, self.device_module
+    
+    # Get the pointer to the start of the virtual address space for the keys, used
+    # by the migrator
+    def get_key_ptr(self):
+        return self.k_buffer_pt
+    
+    # Get the pointer to the start of the virtual address space for the values, used
+    # by the migrator
+    def get_value_ptr(self):
+        return self.v_buffer_pt
 
 @torch.compile 
 def fused_downcast(

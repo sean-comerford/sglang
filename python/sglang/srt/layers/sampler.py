@@ -56,6 +56,13 @@ class Sampler(nn.Module):
                 performs sampling in draft workers.
         """
         logits = logits_output.next_token_logits
+        if sampling_info.temperatures.device != logits.device:
+            sampling_info.temperatures = sampling_info.temperatures.to(
+                logits.device, non_blocking=True
+            )
+            sampling_info.top_ps = sampling_info.top_ps.to(logits.device, non_blocking=True)
+            sampling_info.top_ks = sampling_info.top_ks.to(logits.device, non_blocking=True)
+            sampling_info.min_ps = sampling_info.min_ps.to(logits.device, non_blocking=True)
 
         # Apply the custom logit processors if registered in the sampling info.
         if sampling_info.has_custom_logit_processor:

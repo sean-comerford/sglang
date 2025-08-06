@@ -266,9 +266,12 @@ class ForwardBatch:
         ret = cls(
             forward_mode=batch.forward_mode,
             batch_size=len(batch.seq_lens),
-            input_ids=batch.input_ids,
-            req_pool_indices=batch.req_pool_indices,
-            seq_lens=batch.seq_lens,
+            # input_ids=batch.input_ids,
+            input_ids=batch.input_ids.to(device, non_blocking=True),
+            # req_pool_indices=batch.req_pool_indices,
+            req_pool_indices=batch.req_pool_indices.to(device, non_blocking=True),
+            # seq_lens=batch.seq_lens,
+            seq_lens=batch.seq_lens.to(device, non_blocking=True),
             out_cache_loc=batch.out_cache_loc,
             mm_inputs=batch.multimodal_inputs,
             encoder_cached=batch.encoder_cached,
@@ -352,6 +355,8 @@ class ForwardBatch:
             ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
             ret.extend_seq_lens_cpu = batch.extend_seq_lens
             ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
+            if ret.positions is not None and ret.positions.device != device:
+                ret.positions = ret.positions.to(device, non_blocking=True)
 
         if model_runner.model_is_mrope:
             ret._compute_mrope_positions(model_runner, batch)

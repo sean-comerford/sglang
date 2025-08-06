@@ -119,6 +119,8 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
+        key_pointer: Optional[int] = None,
+        value_pointer: Optional[int] = None,
     ):
         # Print a trace so that I can see where this constructor function is called
         # import traceback
@@ -147,6 +149,9 @@ class ModelRunner:
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
+        # So that migration scheduler can start its key and value virtual address space at the same address as the original
+        self.key_pointer = key_pointer
+        self.value_pointer = value_pointer
 
         # Model-specific adjustment
         self.model_specific_adjustment()
@@ -887,6 +892,8 @@ class ModelRunner:
                 tp_size=self.tp_size,
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
+                key_pointer=self.key_pointer,
+                value_pointer=self.value_pointer,
             )
 
         if self.token_to_kv_pool_allocator is None:
