@@ -8,6 +8,9 @@ Each backend supports two operators: extend (i.e. prefill with cached prefix) an
 """
 
 import os
+import csv
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -41,6 +44,51 @@ if is_flashinfer_available():
     )
     from flashinfer.cascade import merge_state
     from flashinfer.decode import _get_range_buf, get_seq_lens
+    
+# --- CSV Logging Setup ---
+def read_config(config_path="/home/sean/diss/virtualize_llm/config.txt"):
+    config = {}
+    try:
+        with open(config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+    except FileNotFoundError:
+        print(f"Warning: Config file not found at {config_path}")
+    return config
+
+_config = read_config()
+_log_path = "/home/sean/diss/virtualize_llm/experiment_results/{METHOD}/{BATCH_SIZE}_batch_size/{DATASET}/data/read_kv_{MEMORY_LOCATION}_duration_{DURATION}_rps_{RPS}.csv".format(
+    METHOD=_config.get("METHOD"),
+    BATCH_SIZE=_config.get("BATCH_SIZE"),
+    DATASET=_config.get("DATASET"),
+    MEMORY_LOCATION=_config.get("MEMORY_LOCATION"),
+    DURATION=_config.get("DURATION"),
+    RPS=_config.get("RPS")
+)
+
+_log_dir = os.path.dirname(_log_path)
+if not os.path.exists(_log_dir):
+    os.makedirs(_log_dir, exist_ok=True)
+
+_log_lock = threading.Lock()
+_log_file_initialized = os.path.exists(_log_path)
+
+def write_log(data):
+    global _log_file_initialized
+    with _log_lock:
+        is_new_file = not _log_file_initialized
+        if is_new_file:
+            _log_file_initialized = True
+
+        with open(_log_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if is_new_file:
+                writer.writerow(["Operation", "Elapsed Time (microseconds)"])
+            writer.writerow(data)
+# --- End CSV Logging Setup ---
 
 
 class WrapperDispatch(Enum):
@@ -426,6 +474,12 @@ class FlashInferAttnBackend(AttentionBackend):
                     forward_batch.token_to_kv_pool.set_kv_buffer(
                         layer, cache_loc, k, v, layer.k_scale, layer.v_scale
                     )
+                    
+            # ---- START TIMING CODE ----
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            # -------------------------
 
             o = prefill_wrapper_paged.forward(
                 q.view(-1, layer.tp_q_head_num, layer.head_dim),
@@ -437,8 +491,22 @@ class FlashInferAttnBackend(AttentionBackend):
                 k_scale=layer.k_scale,
                 v_scale=layer.v_scale,
             )
+            
+            # ---- END TIMING CODE ----
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time_us = start_event.elapsed_time(end_event) * 1000
+            log_data = ["extend_paged", f"{elapsed_time_us:.4f}"]
+            write_log(log_data)
+            # -----------------------
+            
         else:
             if self.forward_metadata.extend_no_prefix:
+                # ---- START TIMING CODE ----
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+                # -------------------------
                 o = self.prefill_wrapper_ragged.forward(
                     q.view(-1, layer.tp_q_head_num, layer.head_dim),
                     k.view(-1, layer.tp_k_head_num, layer.head_dim),
@@ -447,8 +515,21 @@ class FlashInferAttnBackend(AttentionBackend):
                     sm_scale=layer.scaling,
                     logits_soft_cap=logits_soft_cap,
                 )
+                # ---- END TIMING CODE ----
+                end_event.record()
+                torch.cuda.synchronize()
+                elapsed_time_us = start_event.elapsed_time(end_event) * 1000
+                log_data = ["extend_ragged_no_prefix", f"{elapsed_time_us:.4f}"]
+                write_log(log_data)
+                # -----------------------
 
             else:
+                # ---- START TIMING CODE 1 ----
+                start_event1 = torch.cuda.Event(enable_timing=True)
+                end_event1 = torch.cuda.Event(enable_timing=True)
+                start_event1.record()
+                # ---------------------------
+                
                 o1, s1 = self.prefill_wrapper_ragged.forward_return_lse(
                     q.view(-1, layer.tp_q_head_num, layer.head_dim),
                     k.view(-1, layer.tp_k_head_num, layer.head_dim),
@@ -457,6 +538,22 @@ class FlashInferAttnBackend(AttentionBackend):
                     sm_scale=layer.scaling,
                     logits_soft_cap=logits_soft_cap,
                 )
+                
+                # ---- END TIMING CODE 1 ----
+                end_event1.record()
+                torch.cuda.synchronize()
+                elapsed_time_us1 = start_event1.elapsed_time(end_event1) * 1000
+                log_data1 = ["extend_ragged_lse1", f"{elapsed_time_us1:.4f}"]
+                write_log(log_data1)
+                # -------------------------
+                
+                # ---- START TIMING CODE 2 ----
+                start_event2 = torch.cuda.Event(enable_timing=True)
+                end_event2 = torch.cuda.Event(enable_timing=True)
+                start_event2.record()
+                # ---------------------------
+                
+                
                 o2, s2 = prefill_wrapper_paged.forward_return_lse(
                     q.view(-1, layer.tp_q_head_num, layer.head_dim),
                     forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id),
@@ -464,6 +561,14 @@ class FlashInferAttnBackend(AttentionBackend):
                     sm_scale=layer.scaling,
                     logits_soft_cap=logits_soft_cap,
                 )
+                
+                # ---- END TIMING CODE 2 ----
+                end_event2.record()
+                torch.cuda.synchronize()
+                elapsed_time_us2 = start_event2.elapsed_time(end_event2) * 1000
+                log_data2 = ["extend_ragged_lse2", f"{elapsed_time_us2:.4f}"]
+                write_log(log_data2)
+                # -------------------------
 
                 o, _ = merge_state(o1, s1, o2, s2)
 
@@ -498,6 +603,12 @@ class FlashInferAttnBackend(AttentionBackend):
                 forward_batch.token_to_kv_pool.set_kv_buffer(
                     layer, cache_loc, k, v, layer.k_scale, layer.v_scale
                 )
+                
+        # ---- START TIMING CODE ----
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        # -------------------------
 
         # Call the wrapped function
         o = decode_wrapper.forward(
@@ -508,6 +619,14 @@ class FlashInferAttnBackend(AttentionBackend):
             k_scale=layer.k_scale,
             v_scale=layer.v_scale,
         )
+        
+        # ---- END TIMING CODE ----
+        end_event.record()
+        torch.cuda.synchronize()
+        elapsed_time_us = start_event.elapsed_time(end_event) * 1000
+        log_data = ["decode", f"{elapsed_time_us:.4f}"]
+        write_log(log_data)
+        # -----------------------
 
         return o.view(-1, layer.tp_q_head_num * layer.head_dim)
 

@@ -814,9 +814,6 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         chunked_req: Optional[Req] = None,
     ):
         return_logprob = any(req.return_logprob for req in reqs)
-        device = req_to_token_pool.device
-        if device == "cuda":
-            device = f"cuda:{torch.cuda.current_device()}"
 
         return cls(
             reqs=reqs,
@@ -828,7 +825,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             return_logprob=return_logprob,
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),
-            device=device,
+            device=req_to_token_pool.device,
             spec_algorithm=spec_algorithm,
             enable_custom_logit_processor=enable_custom_logit_processor,
             return_hidden_states=any(req.return_hidden_states for req in reqs),
@@ -1025,12 +1022,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         assert len(self.out_cache_loc) == self.extend_num_tokens
 
-
     def prepare_for_extend(self):
         # Extend refers to prefill phase
         # Collects all requests in the batch
         # For each request, it determines the input tokens to be processes, the number of tokens to extend and more
-        self.forward_mode = ForwardMode.EXTEND
         self.forward_mode = ForwardMode.EXTEND
 
         # Allocate req slots
@@ -1491,10 +1486,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # No need to filter
             return
 
-
-        target_dev = self.req_pool_indices.device
         keep_indices_device = torch.tensor(keep_indices, dtype=torch.int64).to(
-            target_dev, non_blocking=True
+            self.device, non_blocking=True
         )
 
         if self.model_config.is_encoder_decoder:

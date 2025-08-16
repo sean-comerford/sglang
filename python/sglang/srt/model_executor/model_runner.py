@@ -119,12 +119,10 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
-        key_pointer: Optional[int] = None,
-        value_pointer: Optional[int] = None,
     ):
         # Print a trace so that I can see where this constructor function is called
-        # import traceback
-        # print(f"[DEBUG] ModelRunner constructor called from:\n{traceback.format_stack()}")
+        import traceback
+        print(f"[DEBUG] ModelRunner constructor called from:\n{traceback.format_stack()}")
         
         # Parse args
         self.model_config = model_config
@@ -149,13 +147,9 @@ class ModelRunner:
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
-        # So that migration scheduler can start its key and value virtual address space at the same address as the original
-        self.key_pointer = key_pointer
-        self.value_pointer = value_pointer
 
         # Model-specific adjustment
         self.model_specific_adjustment()
-        
 
         if server_args.show_time_cost:
             enable_show_time_cost()
@@ -210,8 +204,7 @@ class ModelRunner:
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=self.server_args.enable_memory_saver
         )
-      
-        
+
         # Load the model
         self.sampler = Sampler()
         self.load_model()
@@ -441,7 +434,6 @@ class ModelRunner:
         return min_per_gpu_memory
 
     def load_model(self):
-        print(f"[DEBUG model_runner.py] Loading model onto GPU {self.gpu_id}. self.device is {self.device}.")
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
             f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
@@ -892,8 +884,6 @@ class ModelRunner:
                 tp_size=self.tp_size,
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
-                key_pointer=self.key_pointer,
-                value_pointer=self.value_pointer,
             )
 
         if self.token_to_kv_pool_allocator is None:

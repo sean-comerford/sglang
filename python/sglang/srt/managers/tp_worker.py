@@ -58,15 +58,11 @@ class TpModelWorker:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None,
-        # The desired start of the key and value virtual address space for the migrated scheduler.
-        key_pointer: Optional[int] = None,
-        value_pointer: Optional[int] = None,
     ):
         # Parse args
         self.tp_size = server_args.tp_size
         self.tp_rank = tp_rank
         self.pp_rank = pp_rank
-        
 
         # Init model and tokenizer
         self.model_config = ModelConfig.from_server_args(
@@ -92,8 +88,6 @@ class TpModelWorker:
             is_draft_worker=is_draft_worker,
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
-            key_pointer=key_pointer,
-            value_pointer=value_pointer,
         )
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None
@@ -118,10 +112,6 @@ class TpModelWorker:
         # Init nccl groups
         self.pp_group = get_pp_group()
         self.world_group = get_world_group()
-        
-        # For migration scheduler to get the correct key and value pointers
-        self.key_pointer = key_pointer
-        self.value_pointer = value_pointer
 
         # Profile number of tokens
         self.max_total_num_tokens = self.model_runner.max_total_num_tokens
@@ -183,7 +173,6 @@ class TpModelWorker:
 
     def get_attention_tp_cpu_group(self):
         return getattr(self.model_runner.attention_tp_group, "cpu_group", None)
-    
 
     def get_memory_pool(self):
         return (

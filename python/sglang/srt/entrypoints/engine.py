@@ -25,7 +25,6 @@ import multiprocessing as mp
 import os
 import signal
 import threading
-import tempfile
 from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 
 import zmq
@@ -37,9 +36,6 @@ setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
 
 import torch
 import uvloop
-
-# Debug
-import time
 
 from sglang.srt.code_completion_parser import load_completion_template_for_openai_api
 from sglang.srt.entrypoints.EngineBase import EngineBase
@@ -87,7 +83,7 @@ logger = logging.getLogger(__name__)
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 _is_cuda = is_cuda()
- 
+
 
 class Engine(EngineBase):
     """
@@ -138,9 +134,6 @@ class Engine(EngineBase):
         self.send_to_rpc = get_zmq_socket(
             context, zmq.DEALER, port_args.rpc_ipc_name, True
         )
-        
-        # Initialise map from gpu_id to ipc_name for migration scheduler
-        self.migration_scheduler_ipc_map = {}
 
     def generate(
         self,
@@ -553,18 +546,12 @@ def _launch_subprocesses(
 
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
-                # Pipe creates a communication channel between the main process and the scheduler process.
-                # duplex=False means the pipe is unidirectional, i.e., only one end can send messages.
-                # The writer end of the pipe is passed to the scheduler process, reader is kept by the main process.
-                # The scheduler uses the writer to send status or initialization messages (like "ready") back to the main process.
-                # The main process uses the reader to receive these messages and coordinate startup or error handling.
                 reader, writer = mp.Pipe(duplex=False)
                 gpu_id = (
                     server_args.base_gpu_id
                     + ((pp_rank % pp_size_per_node) * tp_size_per_node)
                     + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
                 )
-                print(f"[DEBUG engine.py] ------------------------------------ Launching scheduler process on GPU {gpu_id} ------------------------------------")
                 proc = mp.Process(
                     target=run_scheduler_process,
                     args=(
@@ -575,45 +562,12 @@ def _launch_subprocesses(
                         pp_rank,
                         None,
                         writer,
-                        False,  # migrate_scheduler
                     ),
                 )
-                print(f"[DEBUG engine.py] Created original scheduler with ipc filename {port_args.scheduler_input_ipc_name}")
-                
-                # # Debugging for starting a second scheduler process on GPU 1
-                # # NOTE: Doing this assumes that pp_rank, tp_rank are just 1.
-                # reader_1, writer_1 = mp.Pipe(duplex=False)
-                # gpu_id_1 = 1
-                # port_args_1 = PortArgs.init_new(server_args)
-                # proc_1 = mp.Process(
-                #     target=run_scheduler_process,
-                #     args=(
-                #         server_args,
-                #         port_args_1,
-                #         gpu_id_1,
-                #         tp_rank,
-                #         pp_rank,
-                #         None,
-                #         writer_1,
-                #     ),
-                # )
-                # print(f"[DEBUG engine.py] Created extra scheduler with ipc filename {port_args_1.scheduler_input_ipc_name}")
-                
                 with memory_saver_adapter.configure_subprocess():
                     proc.start()
-                    # print(f"[DEBUG engine.py] Sleeping before launching second scheduler process on GPU {gpu_id_1}")
-                    # import time
-                    # time.sleep(30)
-                    # print(f"[DEBUG engine.py] ------------------------------------ Launching second scheduler process on GPU {gpu_id_1} ------------------------------------")
-                    # proc_1.start()
-                # List or multiprocessing.Process objects, each representing a running scheduler process.
-                # When tensor parallelism or parallel parallelism/pipeline parallelism > 1, multiple scheduler processes are launched, each on a different GPU.
                 scheduler_procs.append(proc)
-                # scheduler_procs.append(proc_1)
-                # If we have multiple scheduler processes, the main process needs to keep track of the readers for each scheduler process.
                 scheduler_pipe_readers.append(reader)
-                # scheduler_pipe_readers.append(reader_1)
-                
     else:
         # Launch the data parallel controller
         reader, writer = mp.Pipe(duplex=False)
@@ -655,44 +609,9 @@ def _launch_subprocesses(
         ),
     )
     detoken_proc.start()
-    
-    # Launch migration schedulers on each GPU apart from the current one
-    # Get the number of GPUs in the current node
-    num_gpus_node = torch.cuda.device_count()
-    migration_scheduler_ipc_map: Dict[int, str] = {}
-    print(f"[DEBUG engine.py] Number of GPUs in the current node: {num_gpus_node}")
-    # Iterate through each GPU, starting a migration process on each one except the one currently being used
-    for gpu_id in range(num_gpus_node):
-        if gpu_id != server_args.base_gpu_id:
-            migrate_scheduler_ipc_name = f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
-            migration_scheduler_ipc_map[gpu_id] = migrate_scheduler_ipc_name
-            # Create a new port args for the migration scheduler
-            port_args_migrate = PortArgs.init_new(server_args)
-            # Update the IPC name for the migration scheduler
-            port_args_migrate.tokenizer_to_migration_scheduler_ipc_name = migrate_scheduler_ipc_name
-            reader_migrate, writer_migrate = mp.Pipe(duplex=False)
-            print(f"[DEBUG engine.py] ------------------------------------ Launching migration scheduler process on GPU {gpu_id} ------------------------------------")
-            # Give default vaules for tp_rank, pp_rank and dp_rank for now. Will send these values to the migration process during setup of migration.
-            
-            proc_migrate = mp.Process(
-                target=run_scheduler_process,
-                args=(
-                    server_args,
-                    port_args_migrate,
-                    gpu_id,
-                    0,  # tp_rank
-                    0,  # pp_rank
-                    None,
-                    writer_migrate,  # writer
-                    True,  # migrate_scheduler
-                    migration_scheduler_ipc_map,  # migration_scheduler_ipc_map
-                ),
-            )
-            with memory_saver_adapter.configure_subprocess():
-                proc_migrate.start()
 
     # Launch tokenizer process
-    tokenizer_manager = TokenizerManager(server_args, port_args, migration_scheduler_ipc_map)
+    tokenizer_manager = TokenizerManager(server_args, port_args)
     if server_args.chat_template:
         load_chat_template_for_openai_api(
             tokenizer_manager, server_args.chat_template, server_args.model_path
@@ -702,19 +621,12 @@ def _launch_subprocesses(
 
     if server_args.completion_template:
         load_completion_template_for_openai_api(server_args.completion_template)
-    
-        
-
-    
-    
 
     # Wait for the model to finish loading
     scheduler_infos = []
     for i in range(len(scheduler_pipe_readers)):
         try:
-            # Get the scheduler information from the scheduler process (line 2233 in scheduler.py sends this data).
             data = scheduler_pipe_readers[i].recv()
-            print(f"[DEBUG engine.py] Tokenizer received scheduler info from scheduler {i}")
         except EOFError:
             logger.error(
                 f"Rank {i} scheduler is dead. Please check if there are relevant logs."
@@ -730,11 +642,6 @@ def _launch_subprocesses(
         scheduler_infos.append(data)
 
     # Assume all schedulers have the same scheduler_info
-    print(f"[DEBUG engine.py] All {len(scheduler_infos)} schedulers are ready")
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
     return tokenizer_manager, scheduler_info
-
-
-
-    

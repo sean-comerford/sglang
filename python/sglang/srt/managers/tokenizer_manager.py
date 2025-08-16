@@ -46,8 +46,6 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
-import multiprocessing as mp
-
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import (
@@ -118,10 +116,6 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
-from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
-
-from sglang.srt.managers.migrator_manager import launch_migration_scheduler_process
-
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 logger = logging.getLogger(__name__)
@@ -147,7 +141,6 @@ class ReqState:
     last_output_offset: int = 0
 
 
-
 class TokenizerManager:
     """TokenizerManager is a process that tokenizes the text."""
 
@@ -155,7 +148,6 @@ class TokenizerManager:
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
-        migration_scheduler_ipc_map: Optional[Dict[int, str]] = None,
     ):
         # Parse args
         self.server_args = server_args
@@ -171,15 +163,6 @@ class TokenizerManager:
         self.send_to_scheduler = get_zmq_socket(
             context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
         )
-        # This one socket will receive from All schedulers, done for live migration
-        self.recv_from_scheduler = get_zmq_socket(
-            context, zmq.PULL, port_args.schedulers_to_tokenizer_ipc_name, True
-        )
-        print(f"[DEBUG tokenizer_manager.py] TokenizerManager is receiving from scheduler at {port_args.schedulers_to_tokenizer_ipc_name}")
-        
-        self.context = context
-    
-        
 
         # Read model args
         self.model_path = server_args.model_path
@@ -246,18 +229,6 @@ class TokenizerManager:
 
         # For session info
         self.session_futures = {}  # session_id -> asyncio event
-        
-        # For live migration
-        self.migration_scheduler_ready = False
-        self.migration_proc = None
-        self.migration_reader_pipe = None
-        
-        # GPU to migrate to
-        self.migration_gpu = None
-        # For sending messages to this gpu
-        self.send_to_migration_scheduler = None
-        # Map from GPU ID to IPC name for migration scheduler
-        self.migration_scheduler_ipc_map = migration_scheduler_ipc_map or {}
 
         # Set after scheduler is initialized
         self.max_req_input_len = None
@@ -1047,67 +1018,13 @@ class TokenizerManager:
         kill_process_tree(os.getpid(), include_parent=True)
         sys.exit(0)
 
-    
     async def handle_loop(self):
-        """The event loop that handles messages from detokenizer and scheduler."""
+        """The event loop that handles requests"""
 
         while True:
-            detokenizer_future = self.recv_from_detokenizer.recv_pyobj()
-            scheduler_future = self.recv_from_scheduler.recv_pyobj()
-            done, pending = await asyncio.wait(
-                [detokenizer_future, scheduler_future],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for fut in done:
-                result = fut.result()
-                # print(f"[DEBUG tokenizer_manager.py] Result from future object is: {result}")
-                # Check if result is subscriptable (e.g., dict) and has "msg"
-                if isinstance(result, dict) and result.get("msg") == "migrate":
-                    print(f"[DEBUG tokenizer_manager.py] ***************Received migration request from scheduler: {result}******************")
-                    tp_rank = result.get("tp_rank")
-                    pp_rank = result.get("pp_rank")
-                    dp_rank = result.get("dp_rank")
-                    # Get the pointers to the start of the key and value virtual address space
-                    key_pointer = result.get("k_vm_ptr")
-                    value_pointer = result.get("v_vm_ptr")
-                    self.migration_gpu = result.get("migration_gpu")
-                    # Get the table mapping from gpu -> ipc_name
-                    migration_ipc_name = self.migration_scheduler_ipc_map[self.migration_gpu]
-                    
-                    
-                    self.send_to_migration_scheduler = get_zmq_socket(
-                        self.context, zmq.PUSH, migration_ipc_name, True
-                    )
-
-                    # Tell migration scheduler to load model weights
-                    print(f"[DEBUG tokenizer_manager.py] *************************Telling migration scheduler to load model weights*************************")
-                    print(f"[DEBUG tokenizer_manager.py] Migration ipc name address: {migration_ipc_name}")
-                    self.send_to_migration_scheduler.send_pyobj({"msg" : "load_model_weights", "key_ptr": key_pointer, "value_ptr": value_pointer, "tp_rank": tp_rank, "pp_rank": pp_rank, "dp_rank": dp_rank})
-                # Handle receiving the kv_map from the original scheduler
-                # elif isinstance(result, tuple):
-                #     # Send this to the migration scheduler
-                #     print(f"[DEBUG tokenizer_manager.py] Received kv map from original scheduler: {result}")
-                #     self.send_to_migration_scheduler.send_pyobj(result)
-                #     print(f"[DEBUG tokenizer_manager.py] Sent kv map to migration scheduler: {result}")
-                #     print(f"[DEBUG tokenizer_manager.py] Now sleeping.....")
-                #     time.sleep(60)
-                elif isinstance(result, dict) and result.get("msg") == "ready_for_migration":
-                    print(f"[DEBUG tokenizer_manager.py] ***************Received message from migration scheduler that it is ready for the state******************")
-                    print(f"[DEBUG tokenizer_manager.py] Now getting state from original scheduler")
-                    # Get the state from the original scheduler
-                    self.send_to_scheduler.send_pyobj({"msg" : "export_state"})
-                elif isinstance(result, dict) and result.get("msg") == "scheduler_state":
-                    print(f"[DEBUG tokenizer_manager.py] ***************Received state from original scheduler******************")
-                    # Then send this state to the migration scheduler. 
-                    self.send_to_migration_scheduler.send_pyobj(result)
-                    
-                else:
-                    self._result_dispatcher(result)
-                    self.last_receive_tstamp = time.time()
-
-            for fut in pending:
-                fut.cancel()
+            recv_obj = await self.recv_from_detokenizer.recv_pyobj()
+            self._result_dispatcher(recv_obj)
+            self.last_receive_tstamp = time.time()
 
     def _handle_batch_output(
         self,
@@ -1343,43 +1260,7 @@ class TokenizerManager:
             if len(self.model_update_tmp) == self.server_args.dp_size:
                 self.model_update_result.set_result(self.model_update_tmp)
 
-    # async def launch_migration_scheduler(self, tp_rank: int, pp_rank: int, dp_rank: int):
-    #     """Launches the migration scheduler process asynchronously."""
-    #     loop = asyncio.get_event_loop()
-    #     # Run the blocking process creating in a seperate thread
-    #     self.migration_proc, self.migration_reader_pipe = await loop.run_in_executor(
-    #         None, launch_migration_scheduler_process, self.server_args, tp_rank, pp_rank, dp_rank
-    #     )
-    #     # Add a reader to the event loop to wait for the readiness signal without blocking
-    #     loop.add_reader(self.migration_reader_pipe.fileno(), self.migrator_ready_callback)
-    #     print(f"[DEBUG tokenizer_manager.py] Migration scheduler process launched. Waiting for it to become ready...")
-        
-    # def migrator_ready_callback(self):
-    #     """Callback to handle the migration scheduler readiness signal."""
-    #     try:
-    #         # Wait on this background thread for the migration scheduler to be ready
-    #         data = self.migration_reader_pipe.recv()
-    #         if data.get("status") == "migrate_ready":
-    #             self.migration_scheduler_ready = True                
-    #             print(f"[DEBUG tokenizer_manager.py] Migration scheduler is ready.")
-    #             # Send message to original scheduler to load its model weights
-    #             # Scheduler will handle if it is a migration or original scheduler.
-    #             self.send_to_scheduler.send_pyobj({"msg": "load_model_weights"})
-    #         else:
-    #             raise RuntimeError(
-    #                 "Migration scheduler initialization failed. Please see the error messages above."
-    #             )
-    #     except EOFError:
-    #         logger.error(
-    #             f"Migration scheduler is dead. Please check if there are relevant logs."
-    #         )
-    #     finally:
-    #         # Clean up the reader and the pipe
-    #         loop = asyncio.get_event_loop()
-    #         loop.remove_reader(self.migration_reader_pipe.fileno())
-    #         self.migration_reader_pipe.close()
-    #         self.migration_reader_pipe = None
-            
+
 async def print_exception_wrapper(func):
     """
     Sometimes an asyncio function does not print exception.
